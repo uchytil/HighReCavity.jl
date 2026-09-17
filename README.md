@@ -34,3 +34,7 @@ end
 See `notes/technical_note.md` for the mathematics (exact equivalence with the reference,
 corner/rank analysis, why the textbook nodal ψ–ω formulation is a different discretization) and the
 measured performance.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
