@@ -1,251 +1,129 @@
-# ============================================================================
-# Phase 6/7 — influence-matrix solver.
+# Influence-matrix solve of one implicit step (Method A: fresh re-solve after the boundary
+# correction).  With c = dt/(2 Re_internal) and ω := Δψ = L q, the implicit system is
 #
-# Linear problem solved each time step (c = Δt/(2Re)):
+#     (I − cΔ) ω = f      at interior nodes                          (Helmholtz stage)
+#     L q = ω              at interior nodes,   q|Γ = g (lid data)   (q-Poisson stage)
+#     (L q)|Γ = ω|Γ        wall-vorticity consistency                (closure)
 #
-#     (I − cΔ) ω = f     (interior),   ω|Γ = ξ  (unknown, m values, corners excluded)
-#     "Poisson"  stage   ψ (or q) from ω with prescribed boundary data g
-#     closure    stage   d(ψ, ω) = h   (m equations)
-#
-# Two formulations share this machinery (type parameter `F`):
-#
-#   QForm       — reproduces the reference dense system EXACTLY (to roundoff).
-#                 Poisson stage: interior of q from  laplacian(q) = ω, q|Γ = g (lid data).
-#                 Closure:       laplacian(q)|Γ − ω|Γ = 0   (wall-vorticity consistency).
-#                 (The normal-derivative condition ∂ₙψ = h is imposed *exactly* through
-#                  q|Γ = g, since ∂ₙψ = −2 w q|Γ in the polynomial sense.)
-#
-#   PsiOmegaForm — textbook P_N streamfunction–vorticity influence matrix.
-#                 Poisson stage: Dx²ψ + ψDy²ᵀ = ω, ψ|Γ = 0.
-#                 Closure:       ∂ₙψ|Γ = h  (plain Chebyshev normal derivative).
-#                 This is a DIFFERENT discretization from the reference (see the note).
-#
-# In both cases the closure is affine in ξ:  d(ξ) = d₀ + C ξ,  and the influence
-# matrix C is built once, column by column, from unit boundary-vorticity responses.
-# ============================================================================
+# The unknown wall vorticity ξ = ω|Γ (m = 4(N−1) non-corner wall values) enters linearly:
+# (L q)|Γ = d₀ + Cξ, so the closure is  (C − I) ξ = −d₀.  The m×m matrix  M = C − I  is built
+# once from unit responses and LU-factorized; it equals −I + O(c) and is nonsingular exactly
+# when the original dense system is.  The no-slip condition is imposed through q|Γ = g,
+# because in this representation ∂ₙψ = −2(1−x²) q|Γ exactly.
 
-abstract type Formulation end
-struct QForm <: Formulation end
-struct PsiOmegaForm <: Formulation end
-
-mutable struct InfluenceSolver{F<:Formulation, T<:AbstractFloat, P}
-    grid::ChebyshevGrid{T,2}
-    ops::CavityOperators{T,Matrix{T}}
-    Δt::T
-    Re::T
-    c::T
-    layout::BoundaryLayout
-    helm::SeparableHelmholtzSolver{T}
-    pois::P
-    g::Vector{T}                 # Dirichlet data for the Poisson stage (boundary of q or ψ)
-    h::Vector{T}                 # closure target
-    C::Matrix{T}                 # influence matrix (m×m)
-    Cfact::Any                   # LU (full rank) or SVD pseudo-inverse data
-    svals::Vector{T}             # singular values of C (diagnostic)
-    rank::Int
-    # Method B response matrices ((Nx+1)(Ny+1) × m); empty unless built
-    Rω::Matrix{T}
-    RX::Matrix{T}
-    # work
-    ξ::Vector{T}
-    d0::Vector{T}
-    ωwork::Matrix{T}
-    Xwork::Matrix{T}
-    ω0::Matrix{T}
-    X0::Matrix{T}
+"""
+Ordered non-corner wall nodes: left (1, 2:N), right (N+1, 2:N), bottom (2:N, 1), top (2:N, N+1).
+Corners are excluded: no interior stencil touches them, L q vanishes there, and q's corner
+values never enter any equation.
+"""
+struct BoundaryLayout
+    N::Int
+    m::Int
+    points::Vector{CartesianIndex{2}}
+    left::UnitRange{Int}; right::UnitRange{Int}; bottom::UnitRange{Int}; top::UnitRange{Int}
+    corners::Vector{CartesianIndex{2}}
 end
 
-_poisson_stage(::Type{QForm}, ops; mode) = SeparableQPoissonSolver(ops; mode)
-_poisson_stage(::Type{PsiOmegaForm}, ops; mode) = SeparablePoissonSolver(ops; mode)
+function BoundaryLayout(N::Int)
+    n = N - 1
+    left, right, bottom, top = 1:n, n+1:2n, 2n+1:3n, 3n+1:4n
+    pts = Vector{CartesianIndex{2}}(undef, 4n)
+    for (k, j) in enumerate(2:N)
+        pts[left[k]] = CartesianIndex(1, j);   pts[right[k]] = CartesianIndex(N+1, j)
+        pts[bottom[k]] = CartesianIndex(j, 1); pts[top[k]] = CartesianIndex(j, N+1)
+    end
+    corners = [CartesianIndex(1, 1), CartesianIndex(N+1, 1), CartesianIndex(1, N+1), CartesianIndex(N+1, N+1)]
+    return BoundaryLayout(N, 4n, pts, left, right, bottom, top, corners)
+end
 
-# Poisson stage: boundary of X holds g; interior overwritten.
-_solve_poisson_stage!(X, ω, S::InfluenceSolver{QForm}) = solve_qpoisson_dirichlet!(X, ω, S.pois)
-_solve_poisson_stage!(X, ω, S::InfluenceSolver{PsiOmegaForm}) = solve_poisson_dirichlet!(X, ω, S.pois)
+"Write wall vector v onto the four edges of M (corners set to zero); interior untouched."
+function set_walls!(M::AbstractMatrix, v::AbstractVector, L::BoundaryLayout)
+    @inbounds for k in 1:L.m
+        M[L.points[k]] = v[k]
+    end
+    @inbounds for c in L.corners
+        M[c] = zero(eltype(M))
+    end
+    return M
+end
 
-# Closure functional d(X, ω) (affine in the boundary vorticity)
-function closure!(d, X, ω, S::InfluenceSolver{QForm})
-    laplacian_boundary!(d, X, S.ops, S.layout)         # (L q)|Γ
-    @inbounds for k in 1:S.layout.m
-        d[k] -= ω[S.layout.points[k]]                    # − ω|Γ
+"""
+    wall_laplacian!(d, q, ops, L)  —  d = (L q)|Γ,  the wall rows/columns of  D2q·Q·W + W·Q·D2qᵀ
+
+O(N²): at a wall only the derivative *normal* to it survives because W = 0 there (the
+W-weighted terms are kept so that this is exactly the wall part of `laplacian!`).
+"""
+function wall_laplacian!(d::AbstractVector{T}, q::AbstractMatrix{T}, ops::CavityOperators{T}, L::BoundaryLayout) where {T}
+    N = L.N; D2q = ops.D2q; w = ops.w
+    @inbounds for (k, j) in enumerate(2:N)
+        d[L.left[k]]   = w[j] * dot(view(D2q, 1, :), view(q, :, j))   + w[1]   * dot(view(q, 1, :), view(D2q, j, :))
+        d[L.right[k]]  = w[j] * dot(view(D2q, N+1, :), view(q, :, j)) + w[N+1] * dot(view(q, N+1, :), view(D2q, j, :))
+        d[L.bottom[k]] = w[j] * dot(view(q, j, :), view(D2q, 1, :))   + w[1]   * dot(view(D2q, j, :), view(q, :, 1))
+        d[L.top[k]]    = w[j] * dot(view(q, j, :), view(D2q, N+1, :)) + w[N+1] * dot(view(D2q, j, :), view(q, :, N+1))
     end
     return d
 end
-closure!(d, X, ω, S::InfluenceSolver{PsiOmegaForm}) = normal_derivative_boundary!(d, X, S.ops, S.layout)
 
-"""
-    InfluenceSolver(F, grid, ops, Δt, Re; helmholtz_mode=:eigen, poisson_mode, build_response=false, verbose=true)
-
-Builds the Helmholtz and Poisson-stage decompositions, the boundary layout, the
-influence matrix `C` (m×m, m = 2(Nx-1)+2(Ny-1)) and its factorization.  Prints
-rank/conditioning diagnostics when `verbose`.
-"""
-function InfluenceSolver(::Type{F}, grid::ChebyshevGrid{T,2}, ops::CavityOperators{T,Matrix{T}}, Δt::T, Re::T;
-                         helmholtz_mode::Symbol = :eigen,
-                         poisson_mode::Symbol = (F === QForm ? :schur : :eigen),
-                         build_response::Bool = false, verbose::Bool = true,
-                         rank_tol = nothing, reduction::Symbol = :svd) where {F<:Formulation, T<:AbstractFloat}
-    Nx, Ny = grid.Ns
-    c = T(0.5) * Δt / Re
-    layout = BoundaryLayout(Nx, Ny)
-    helm = SeparableHelmholtzSolver(ops, c; mode = helmholtz_mode)
-    pois = _poisson_stage(F, ops; mode = poisson_mode)
-    if F === QForm
-        g = lid_q_boundary(grid, layout)
-        h = zeros(T, layout.m)
-    else
-        g = zeros(T, layout.m)
-        h = lid_normal_derivative_target(grid, ops, layout)
-    end
-    m = layout.m
-    S = InfluenceSolver{F,T,typeof(pois)}(grid, ops, Δt, Re, c, layout, helm, pois, g, h,
-            zeros(T, m, m), nothing, T[], 0, zeros(T, 0, 0), zeros(T, 0, 0),
-            zeros(T, m), zeros(T, m),
-            zeros(T, Nx+1, Ny+1), zeros(T, Nx+1, Ny+1), zeros(T, Nx+1, Ny+1), zeros(T, Nx+1, Ny+1))
-    build_influence_matrix!(S; build_response)
-    factorize_influence!(S; rank_tol, reduction, verbose)
-    return S
+struct InfluenceSolver{T<:AbstractFloat, H<:HelmholtzSolver{T}, P<:QPoissonSolver{T}}
+    ops::CavityOperators{T}
+    layout::BoundaryLayout
+    helm::H
+    pois::P
+    g::Vector{T}                    # lid data q|Γ
+    M::Matrix{T}                    # influence matrix  C − I
+    Mlu::LU{T,Matrix{T},Vector{Int}}
+    condM::T                        # condition number of M (diagnostic)
+    ξ::Vector{T}; d::Vector{T}      # wall vorticity, closure residual
+    zero_f::Matrix{T}               # f = 0 for the unit responses
 end
 
-InfluenceSolver(grid, ops, Δt, Re; kw...) = InfluenceSolver(QForm, grid, ops, Δt, Re; kw...)
-
 """
-    build_influence_matrix!(S; build_response=false)
+    InfluenceSolver(ops, c; backend)   with  c = dt / (2 Re_internal)
 
-For each boundary unit vector e_k: ω⁽ᵏ⁾ = Helmholtz(f=0, ω|Γ=e_k), X⁽ᵏ⁾ = Poisson(ω⁽ᵏ⁾, X|Γ=0),
-C[:, k] = closure(X⁽ᵏ⁾, ω⁽ᵏ⁾).  Optionally stores the flattened responses (Method B).
+Builds the Helmholtz and q-Poisson decompositions (`backend` selects the latter) and the influence matrix
+M[:, k] = (L q⁽ᵏ⁾)|Γ − e_k, where (ω⁽ᵏ⁾, q⁽ᵏ⁾) is the response to f = 0, ω|Γ = e_k, q|Γ = 0.
 """
-function build_influence_matrix!(S::InfluenceSolver{F,T}; build_response::Bool = false) where {F,T}
-    m = S.layout.m
-    n = length(S.ωwork)
-    ω = S.ωwork; X = S.Xwork
-    zerof = S.ω0            # f = 0 (only interior of f is read)
-    fill!(zerof, zero(T))
-    if build_response
-        S.Rω = zeros(T, n, m); S.RX = zeros(T, n, m)
-    end
-    ek = zeros(T, m)
-    d = zeros(T, m)
+function InfluenceSolver(ops::CavityOperators{T}, c::T; backend::Symbol = :ceigen) where {T}
+    N = ops.grid.N
+    L = BoundaryLayout(N)
+    helm = HelmholtzSolver(ops, c)
+    pois = QPoissonSolver(ops, backend)
+    g = lid_boundary_values(ops, L)
+    m = L.m
+    M = zeros(T, m, m)
+    ω = zeros(T, N+1, N+1); q = zeros(T, N+1, N+1); zero_f = zeros(T, N+1, N+1)
+    ek = zeros(T, m); d = zeros(T, m)
     for k in 1:m
-        fill!(ek, zero(T)); ek[k] = one(T)
-        fill!(ω, zero(T)); scatter!(ω, ek, S.layout)
-        solve_helmholtz_dirichlet!(ω, zerof, S.helm)
-        fill!(X, zero(T))                                   # X|Γ = 0 (homogeneous response)
-        _solve_poisson_stage!(X, ω, S)
-        closure!(d, X, ω, S)
-        S.C[:, k] .= d
-        if build_response
-            S.Rω[:, k] .= vec(ω); S.RX[:, k] .= vec(X)
-        end
+        ek .= 0; ek[k] = 1
+        set_walls!(ω, ek, L);  helmholtz!(ω, zero_f, helm)          # (I − cΔ) ω⁽ᵏ⁾ = 0,  ω⁽ᵏ⁾|Γ = e_k
+        fill!(q, 0);           qpoisson!(q, ω, pois)                 # L q⁽ᵏ⁾ = ω⁽ᵏ⁾,      q⁽ᵏ⁾|Γ = 0
+        wall_laplacian!(d, q, ops, L)
+        M[:, k] .= d .- ek
     end
-    return S
+    sv = svdvals(M)
+    condM = sv[1] / sv[end]
+    condM > 1e12 && @warn "influence matrix is nearly singular (κ = $condM)"
+    return InfluenceSolver{T,typeof(helm),typeof(pois)}(ops, L, helm, pois, g, M, lu(M), condM, zeros(T, m), d, zero_f)
 end
 
 """
-    factorize_influence!(S; rank_tol=nothing, reduction=:svd, verbose=true)
+    influence_solve!(q, ω, f, S)
 
-SVD diagnostic of `C` (rank, conditioning, smallest singular values).
-
-* full rank            → LU factorization.
-* rank deficient       → `reduction = :svd`  : minimum-norm least-squares solve with an
-                          *explicit* truncated SVD of the reported rank (the null-space
-                          directions of ω|Γ are invisible to the interior equations, so
-                          the interior ω and ψ do not depend on this choice);
-                         `reduction = :drop4` : drop the four wall-end unknowns and
-                          constraints (1,2), (1,Ny), (Nx+1,2), (Nx+1,Ny) and LU-factorize
-                          the remaining square system (classical corner treatment).
-The rank tolerance is `m·eps·σ_max` unless `rank_tol` is given; it is printed.
+Given the explicit right-hand side f (interior values), computes q^{n+1} (interior; walls set
+to the lid data) and the corresponding vorticity ω = L q (all nodes, corners zero).
 """
-function factorize_influence!(S::InfluenceSolver{F,T}; rank_tol = nothing, reduction::Symbol = :svd,
-                              verbose::Bool = true) where {F,T}
-    C = S.C
-    m = size(C, 1)
-    sv = svdvals(C)
-    S.svals = sv
-    tol = rank_tol === nothing ? m * eps(T) * sv[1] : rank_tol
-    r = count(>(tol), sv)
-    S.rank = r
-    if verbose
-        @printf("Influence matrix (%s): %d×%d, numerical rank %d (tol %.2e), σ_max = %.3e, σ_min = %.3e, κ = %.3e\n",
-                string(F), m, m, r, tol, sv[1], sv[end], sv[1]/sv[end])
-        @printf("  smallest singular values: %s\n", join([@sprintf("%.3e", s) for s in sv[max(1,end-5):end]], ", "))
-    end
-    if r == m
-        S.Cfact = lu(C)
-    elseif reduction == :svd
-        verbose && @warn "Influence matrix is rank deficient ($r < $m); using truncated-SVD minimum-norm least squares"
-        U, s, V = svd(C)
-        S.Cfact = (kind = :svd, U = U[:, 1:r], s = s[1:r], V = V[:, 1:r], Unull = U[:, r+1:m], Vnull = V[:, r+1:m],
-                   tmp = zeros(T, r))
-    elseif reduction == :drop4
-        L = S.layout
-        drop = [L.left[1], L.left[end], L.right[1], L.right[end]]
-        keep = setdiff(1:m, drop)
-        Cr = C[keep, keep]
-        svr = svdvals(Cr)
-        verbose && @printf("  reduced system (drop 4 wall-end dofs): %d×%d, κ = %.3e\n", length(keep), length(keep), svr[1]/svr[end])
-        S.Cfact = (kind = :drop4, keep = keep, lu = lu(Cr), tmp = zeros(T, length(keep)))
-    else
-        error("unknown reduction $reduction")
-    end
-    return S
-end
-
-function _solve_influence!(ξ, S::InfluenceSolver, rhs)
-    f = S.Cfact
-    if f isa LU
-        ξ .= rhs
-        ldiv!(f, ξ)
-    elseif f.kind == :svd
-        mul!(f.tmp, transpose(f.U), rhs)
-        f.tmp ./= f.s
-        mul!(ξ, f.V, f.tmp)
-    else # :drop4
-        f.tmp .= view(rhs, f.keep)
-        ldiv!(f.lu, f.tmp)
-        fill!(ξ, zero(eltype(ξ)))
-        view(ξ, f.keep) .= f.tmp
-    end
-    return ξ
-end
-
-"""
-    solve_timestep_linear!(ω, X, f, S::InfluenceSolver; method = :resolve)
-
-Given the explicit right-hand side `f` (interior values used), computes the new
-vorticity `ω` (full grid; corners zero) and the new `X` (= q for `QForm`, = ψ for
-`PsiOmegaForm`; boundary = `S.g`).
-
-`method = :resolve`  — Method A: particular solve with ω|Γ=0 → d₀; solve Cξ = h − d₀;
-                        then one more Helmholtz+Poisson pair with ω|Γ = ξ.
-`method = :response` — Method B: ω = ω₀ + Rω ξ, X = X₀ + RX ξ (requires `build_response=true`).
-"""
-function solve_timestep_linear!(ω::AbstractMatrix{T}, X::AbstractMatrix{T}, f::AbstractMatrix{T},
-                                S::InfluenceSolver{F,T}; method::Symbol = :resolve) where {F,T}
-    L = S.layout
-    ξ = S.ξ; d0 = S.d0
-    # --- particular solution: ω|Γ = 0 ---
-    ω0 = (method == :response) ? S.ω0 : ω
-    X0 = (method == :response) ? S.X0 : X
-    fill!(ξ, zero(T)); scatter!(ω0, ξ, L)
-    solve_helmholtz_dirichlet!(ω0, f, S.helm)
-    scatter!(X0, S.g, L)
-    _solve_poisson_stage!(X0, ω0, S)
-    closure!(d0, X0, ω0, S)
-    # --- boundary vorticity: C ξ = h − d₀ ---
-    d0 .= S.h .- d0
-    _solve_influence!(ξ, S, d0)
-    # --- correction ---
-    if method == :resolve
-        scatter!(ω, ξ, L)
-        solve_helmholtz_dirichlet!(ω, f, S.helm)
-        scatter!(X, S.g, L)
-        _solve_poisson_stage!(X, ω, S)
-    elseif method == :response
-        isempty(S.Rω) && error("response matrices not built; construct with build_response=true")
-        mul!(vec(ω), S.Rω, ξ); ω .+= ω0
-        mul!(vec(X), S.RX, ξ); X .+= X0
-    else
-        error("unknown method $method")
-    end
-    return ω, X
+function influence_solve!(q::AbstractMatrix{T}, ω::AbstractMatrix{T}, f::AbstractMatrix{T}, S::InfluenceSolver{T}) where {T}
+    L = S.layout; ξ = S.ξ; d = S.d
+    # 1. particular solution with zero wall vorticity → closure residual d₀ = (L q₀)|Γ
+    ξ .= 0
+    set_walls!(ω, ξ, L);    helmholtz!(ω, f, S.helm)
+    set_walls!(q, S.g, L);  qpoisson!(q, ω, S.pois)
+    wall_laplacian!(d, q, S.ops, L)
+    # 2. wall vorticity from the closure  (C − I) ξ = −d₀
+    ξ .= .-d
+    ldiv!(S.Mlu, ξ)
+    # 3. re-solve with the correct wall vorticity (Method A)
+    set_walls!(ω, ξ, L);    helmholtz!(ω, f, S.helm)
+    set_walls!(q, S.g, L);  qpoisson!(q, ω, S.pois)
+    return q, ω
 end

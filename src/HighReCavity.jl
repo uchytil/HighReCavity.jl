@@ -1,35 +1,26 @@
+"""
+HighReCavity — 2-D lid-driven cavity, Chebyshev collocation on a mapped grid, streamfunction
+ψ = (1−x²)(1−y²) q, AB2/Crank–Nicolson time stepping with an influence-matrix solve of the
+implicit step (no dense (N+1)²×(N+1)² operator).
+
+    params = CavityParameters(N = 128, Re = 30_000, dt = 5e-4)     # Re: full side length L = 2
+    sim = CavitySimulation(params)
+    run!(sim, 60_000; callback = s -> println(s.step), every = 1000)
+    ψ = streamfunction(sim); ω = vorticity(sim); u, v = velocity(sim)
+"""
 module HighReCavity
 
 using LinearAlgebra
-using Printf
 
-include("reference.jl")
-include("psiomega.jl")
-include("sylvester.jl")
-include("boundary.jl")
-include("influence.jl")
-include("timestep.jl")
+include("chebyshev.jl")      # grid, differentiation, interpolation
+include("operators.jl")      # q-formulation operators, RHS building blocks, physical fields
+include("sylvester.jl")      # interior Dirichlet solves (Helmholtz, q-Poisson) via 1-D decompositions
+include("influence.jl")      # boundary layout, influence matrix, one implicit solve
+include("simulation.jl")     # parameters, state, step!, run!
 
-# reference (verbatim) API
-export ChebyshevGrid, CavityOperators, diff_matrices, laplacian, biharmonic, convection,
-       velocity, vorticity, laplacian_matrix, biharmonic_matrix, get_boundary_indices,
-       build_system_matrix, apply_bcs_system!, apply_bcs_rhs!, interp_matrices
-export ReferenceSystem, step_reference!, reference_rhs, reference_initial_state
-# ψ–ω routines
-export streamfunction_from_q, velocity_from_streamfunction, velocity_from_streamfunction!,
-       vorticity_derivatives, vorticity_derivatives!, convection_from_uvω, convection_from_ψω,
-       laplacian_ψ, laplacian_ω, laplacian_ψ!, laplacian_ω!, laplacian_boundary!
-# separable solvers
-export SylvesterSolver, solve!, SeparableHelmholtzSolver, solve_helmholtz_dirichlet!,
-       SeparablePoissonSolver, solve_poisson_dirichlet!, SeparableQPoissonSolver, solve_qpoisson_dirichlet!
-# boundary
-export BoundaryLayout, gather, gather!, scatter!, normal_derivative_boundary, normal_derivative_boundary!,
-       normal_derivative_boundary_q, lid_q_boundary, lid_normal_derivative_target
-# influence
-export Formulation, QForm, PsiOmegaForm, InfluenceSolver, build_influence_matrix!, factorize_influence!,
-       solve_timestep_linear!
-# time stepping
-export QWorkspace, laplacian!, biharmonic!, convection!, qform_rhs!, QState, step_influence!,
-       PsiOmegaState, psiomega_rhs!, step_psiomega!
+export CavityParameters, CavitySimulation, step!, run!,
+       streamfunction, vorticity, velocity, grid, reynolds_internal,
+       ChebyshevGrid, CavityOperators, diff_matrices, interp_matrix,
+       InfluenceSolver, influence_solve!, rhs!, laplacian!, biharmonic!, convection!
 
 end # module

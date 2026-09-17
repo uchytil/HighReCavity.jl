@@ -1,290 +1,151 @@
-# ============================================================================
-# Phase 3 — separable (tensor-product) Dirichlet solvers.
+# Interior Dirichlet solves as Sylvester equations  A X + X Bᵀ = G  on the (N−1)² interior
+# nodes, using precomputed decompositions of the two 1-D operators only.  Nothing of size
+# (N+1)²×(N+1)² is ever formed.
 #
-# Every solver here reduces to an interior Sylvester equation
+# The cavity is square, so the same 1-D operator A appears on both sides:  A X + X Aᵀ = G.
 #
-#       A X + X Bᵀ = G,        A ∈ R^{(Nx-1)×(Nx-1)},  B ∈ R^{(Ny-1)×(Ny-1)}
-#
-# which is solved with precomputed decompositions of the 1-D operators only.
-# No (N+1)²×(N+1)² matrix is ever formed.
-#
-# Two backends:
-#   :eigen  — A = VA ΛA VA⁻¹, B = VB ΛB VB⁻¹ (real eigenvalues required)
-#             X = VA * ((VA⁻¹ G VB⁻ᵀ) ./ (λA_i + λB_j)) * VBᵀ          (4 GEMMs)
-#   :schur  — A = ZA TA ZAᵀ, B = ZB TB ZBᵀ (real Schur, Bartels–Stewart)
-#             TA Y + Y TBᵀ = ZAᵀ G ZB  (LAPACK trsyl),  X = ZA Y ZBᵀ  (4 GEMMs + trsyl)
-#   :ceigen — same as :eigen but in complex arithmetic (for operators with a complex
-#             spectrum, e.g. the q-form Wx⁻¹D²x_q); 4 complex GEMMs, result projected
-#             to the real part.  Faster than :schur (trsyl is unblocked) but its
-#             accuracy degrades with κ(V); use only where validated.
-# ============================================================================
+#   :ceigen  A = V Λ V⁻¹ (eigendecomposition):
+#            X = V [ (V⁻¹ G V⁻ᵀ) ./ (λ_i + λ_j) ] Vᵀ                    4 GEMMs
+#            Real arithmetic when the spectrum is real (Helmholtz stage: ½I − cD2, κ(V) ≈ 2),
+#            complex otherwise (q-Poisson stage: W⁻¹D2q has spurious complex high modes).
+#   :schur   A = Z T Zᵀ (real Schur, Bartels–Stewart):
+#            T Ŷ + Ŷ Tᵀ = Zᵀ G Z  (LAPACK trsyl),  X = Z Ŷ Zᵀ           4 GEMMs + trsyl
+#            Backward stable regardless of κ(V); ~4× slower because trsyl is unblocked.
 
-struct SylvesterSolver{T<:AbstractFloat}
-    mode::Symbol
-    nx::Int
-    ny::Int
-    # eigen mode
-    VA::Matrix{T}; VAinv::Matrix{T}; λA::Vector{T}
-    VB::Matrix{T}; VBinv::Matrix{T}; λB::Vector{T}
-    invden::Matrix{T}                       # 1 / (λA_i + λB_j)
-    # schur mode
-    ZA::Matrix{T}; TA::Matrix{T}
-    ZB::Matrix{T}; TB::Matrix{T}
-    # complex eigen mode
-    cVA::Matrix{Complex{T}}; cVAinv::Matrix{Complex{T}}
-    cVB::Matrix{Complex{T}}; cVBinv::Matrix{Complex{T}}
-    cinvden::Matrix{Complex{T}}
-    cW1::Matrix{Complex{T}}; cW2::Matrix{Complex{T}}; cG::Matrix{Complex{T}}
-    # work
-    W1::Matrix{T}; W2::Matrix{T}
+struct SylvesterSolver{T<:AbstractFloat, S<:Union{T, Complex{T}}}
+    backend::Symbol
+    # :ceigen  (S = T or Complex{T})
+    V::Matrix{S}; Vinv::Matrix{S}
+    invden::Matrix{S}                 # 1 / (λ_i + λ_j)
+    C1::Matrix{S}; C2::Matrix{S}
+    # :schur
+    Z::Matrix{T}; Tm::Matrix{T}
+    R1::Matrix{T}; R2::Matrix{T}
 end
 
-_noc(T, n, m) = zeros(Complex{T}, n, m)
-
-"""
-    SylvesterSolver(A, B; mode = :eigen)
-
-Precomputes everything needed to solve `A X + X Bᵀ = G` repeatedly.
-`mode = :eigen` requires `A` and `B` to be diagonalizable with real spectra
-(checked; falls back to `:schur` with a warning otherwise).
-"""
-function SylvesterSolver(A::AbstractMatrix{T}, B::AbstractMatrix{T}; mode::Symbol = :eigen,
-                         imag_tol = 1e-10) where {T<:AbstractFloat}
-    nx, ny = size(A, 1), size(B, 1)
-    A = Matrix{T}(A); B = Matrix{T}(B)
-    if mode == :eigen
-        EA = eigen(A); EB = eigen(B)
-        if maximum(abs, imag.(EA.values); init = 0.0) > imag_tol * maximum(abs, EA.values) ||
-           maximum(abs, imag.(EB.values); init = 0.0) > imag_tol * maximum(abs, EB.values)
-            @info "SylvesterSolver: complex eigenvalues detected, falling back to :schur"
-            mode = :schur
-        else
-            VA = real.(EA.vectors); λA = real.(EA.values)
-            VB = real.(EB.vectors); λB = real.(EB.values)
-            invden = [one(T) / (λA[i] + λB[j]) for i in 1:nx, j in 1:ny]
-            any(!isfinite, invden) && error("SylvesterSolver: singular Sylvester operator (λA_i + λB_j = 0)")
-            return SylvesterSolver{T}(:eigen, nx, ny, VA, inv(VA), λA, VB, inv(VB), λB, invden,
-                                      zeros(T, 0, 0), zeros(T, 0, 0), zeros(T, 0, 0), zeros(T, 0, 0),
-                                      _noc(T,0,0), _noc(T,0,0), _noc(T,0,0), _noc(T,0,0), _noc(T,0,0), _noc(T,0,0), _noc(T,0,0), _noc(T,0,0),
-                                      zeros(T, nx, ny), zeros(T, nx, ny))
-        end
+"Precompute the decomposition of A for solving  A X + X Aᵀ = G."
+function SylvesterSolver(A::AbstractMatrix{T}, backend::Symbol) where {T<:AbstractFloat}
+    n = size(A, 1)
+    rz(k, l) = zeros(T, k, l)
+    if backend == :ceigen
+        E = eigen(Matrix(A)); λ = E.values
+        S = eltype(λ) <: Real ? T : Complex{T}          # real spectrum → real arithmetic
+        V = Matrix{S}(E.vectors)
+        invden = [one(S) / (λ[i] + λ[j]) for i in 1:n, j in 1:n]
+        all(isfinite, invden) || error("singular Sylvester operator (λ_i + λ_j = 0)")
+        return SylvesterSolver{T,S}(backend, V, inv(V), invden, zeros(S, n, n), zeros(S, n, n), rz(0, 0), rz(0, 0), rz(0, 0), rz(0, 0))
+    elseif backend == :schur
+        F = schur(Matrix(A))
+        return SylvesterSolver{T,T}(backend, rz(0, 0), rz(0, 0), rz(0, 0), rz(0, 0), rz(0, 0),
+                                    Matrix(F.Z), Matrix(F.T), rz(n, n), rz(n, n))
     end
-    if mode == :ceigen
-        EA = eigen(A); EB = eigen(B)
-        VA = Matrix{Complex{T}}(EA.vectors); VB = Matrix{Complex{T}}(EB.vectors)
-        λA = Complex{T}.(EA.values); λB = Complex{T}.(EB.values)
-        invden = [one(Complex{T}) / (λA[i] + λB[j]) for i in 1:nx, j in 1:ny]
-        any(!isfinite, invden) && error("SylvesterSolver: singular Sylvester operator (λA_i + λB_j = 0)")
-        return SylvesterSolver{T}(:ceigen, nx, ny,
-                                  zeros(T, 0, 0), zeros(T, 0, 0), T[], zeros(T, 0, 0), zeros(T, 0, 0), T[], zeros(T, 0, 0),
-                                  zeros(T, 0, 0), zeros(T, 0, 0), zeros(T, 0, 0), zeros(T, 0, 0),
-                                  VA, inv(VA), VB, inv(VB), invden, _noc(T,nx,ny), _noc(T,nx,ny), _noc(T,nx,ny),
-                                  zeros(T, nx, ny), zeros(T, nx, ny))
-    end
-    mode == :schur || error("unknown mode $mode")
-    SA = schur(A); SB = schur(B)
-    return SylvesterSolver{T}(:schur, nx, ny,
-                              zeros(T, 0, 0), zeros(T, 0, 0), T[], zeros(T, 0, 0), zeros(T, 0, 0), T[], zeros(T, 0, 0),
-                              Matrix(SA.Z), Matrix(SA.T), Matrix(SB.Z), Matrix(SB.T),
-                              _noc(T,0,0), _noc(T,0,0), _noc(T,0,0), _noc(T,0,0), _noc(T,0,0), _noc(T,0,0), _noc(T,0,0), _noc(T,0,0),
-                              zeros(T, nx, ny), zeros(T, nx, ny))
+    error("unknown backend $backend (use :ceigen or :schur)")
 end
 
-"""
-    solve!(X, S::SylvesterSolver, G)
-
-Solves `A X + X Bᵀ = G` in place (X may alias G). No allocations.
-"""
-function solve!(X::AbstractMatrix{T}, S::SylvesterSolver{T}, G::AbstractMatrix{T}) where {T}
-    W1, W2 = S.W1, S.W2
-    if S.mode == :eigen
-        mul!(W1, S.VAinv, G)
-        mul!(W2, W1, transpose(S.VBinv))
-        W2 .*= S.invden
-        mul!(W1, S.VA, W2)
-        mul!(X, W1, transpose(S.VB))
-    elseif S.mode == :ceigen
-        S.cG .= G
-        mul!(S.cW1, S.cVAinv, S.cG)
-        mul!(S.cW2, S.cW1, transpose(S.cVBinv))
-        S.cW2 .*= S.cinvden
-        mul!(S.cW1, S.cVA, S.cW2)
-        mul!(S.cG, S.cW1, transpose(S.cVB))
-        X .= real.(S.cG)
+"Solve A X + X Aᵀ = G in place (allocation-free)."
+function sylvester_solve!(X::AbstractMatrix{T}, S::SylvesterSolver{T}, G::AbstractMatrix{T}) where {T}
+    if S.backend == :ceigen
+        S.C1 .= G
+        mul!(S.C2, S.Vinv, S.C1)
+        mul!(S.C1, S.C2, transpose(S.Vinv))
+        S.C1 .*= S.invden
+        mul!(S.C2, S.V, S.C1)
+        mul!(S.C1, S.C2, transpose(S.V))
+        X .= real.(S.C1)
     else
-        mul!(W1, transpose(S.ZA), G)
-        mul!(W2, W1, S.ZB)
-        _, scale = LAPACK.trsyl!('N', 'T', S.TA, S.TB, W2)
-        scale == one(T) || (W2 ./= scale)
-        mul!(W1, S.ZA, W2)
-        mul!(X, W1, transpose(S.ZB))
+        mul!(S.R1, transpose(S.Z), G)
+        mul!(S.R2, S.R1, S.Z)
+        _, scale = LAPACK.trsyl!('N', 'T', S.Tm, S.Tm, S.R2)
+        scale == one(T) || (S.R2 ./= scale)
+        mul!(S.R1, S.Z, S.R2)
+        mul!(X, S.R1, transpose(S.Z))
     end
     return X
 end
 
-# boundary rows ω[[1,Nx+1], 2:Ny] → Bx (2×(Ny-1)),  boundary cols ω[2:Nx, [1,Ny+1]] → By ((Nx-1)×2)
-function _boundary_rows_cols!(Bx, By, ω, Nx, Ny)
-    @inbounds for (k, j) in enumerate(2:Ny)
-        Bx[1, k] = ω[1, j]; Bx[2, k] = ω[Nx+1, j]
-    end
-    @inbounds for (k, i) in enumerate(2:Nx)
-        By[k, 1] = ω[i, 1]; By[k, 2] = ω[i, Ny+1]
-    end
-    return Bx, By
+# ---------------------------------------------------------------------------------------
+# The two interior Dirichlet problems of one time step.  Fields are (N+1)×(N+1); the
+# boundary rows/columns of the solution array are *inputs* (Dirichlet data) and the
+# interior is overwritten.  ii = 2:N are interior indices, b = [1, N+1] the wall indices.
+# ---------------------------------------------------------------------------------------
+
+"""
+Helmholtz stage:  (I − cΔ) ω = f  at interior nodes, Δ = D2·Ω + Ω·D2ᵀ, ω|Γ prescribed.
+
+    (½I − c D2ᵢᵢ) Ωᵢ + Ωᵢ (½I − c D2ᵢᵢ)ᵀ = fᵢ + c (D2ᵢ,ᵦ Ωᵦ,ᵢ + Ωᵢ,ᵦ D2ᵢ,ᵦᵀ)
+"""
+struct HelmholtzSolver{T<:AbstractFloat, SY<:SylvesterSolver{T}}
+    N::Int; c::T
+    syl::SY
+    D2_ib::Matrix{T}                 # D2[ii, b]      (N−1)×2
+    Bx::Matrix{T}; By::Matrix{T}     # wall rows Ω[b, ii] (2×(N−1)) and wall columns Ω[ii, b] ((N−1)×2)
+    G::Matrix{T}; Xi::Matrix{T}      # interior work
 end
 
-# ----------------------------------------------------------------------------
-# Dirichlet problems on the full grid.  Fields are (Nx+1)×(Ny+1); the boundary
-# rows/columns of the *solution array* are inputs (prescribed Dirichlet data)
-# and the interior is overwritten with the solution.
-# ----------------------------------------------------------------------------
-
-"""
-    SeparableHelmholtzSolver(ops, c; mode = :eigen)
-
-Solves  (I − cΔ) ω = f  on the interior, ω|Γ prescribed, with Δ = Dx² ⊗ I + I ⊗ Dy²
-(the plain Chebyshev Laplacian `ops.ψ`).  Interior equation:
-
-    (½I − c Dx²ᵢᵢ) Ωᵢ + Ωᵢ (½I − c Dy²ⱼⱼ)ᵀ = fᵢ + c (Dx²ᵢ,ᵦ Ωᵦ,ⱼ + Ωᵢ,ᵦ Dy²ⱼ,ᵦᵀ)
-"""
-struct SeparableHelmholtzSolver{T<:AbstractFloat}
-    Nx::Int; Ny::Int; c::T
-    syl::SylvesterSolver{T}
-    Dxx_ib::Matrix{T}     # Dx²[ii, [1, Nx+1]]   (Nx-1)×2
-    Dyy_jb::Matrix{T}     # Dy²[jj, [1, Ny+1]]   (Ny-1)×2
-    Bx::Matrix{T}         # 2×(Ny-1) work: boundary rows ω[[1,Nx+1], jj]
-    By::Matrix{T}         # (Nx-1)×2 work: boundary cols ω[ii, [1,Ny+1]]
-    G::Matrix{T}          # interior RHS work
-    Xi::Matrix{T}         # interior solution work
+# The Helmholtz operator has a real, well-conditioned spectrum, so it always uses the eigen path
+# (as in the validated implementation); `backend` only selects the q-Poisson stage.
+function HelmholtzSolver(ops::CavityOperators{T}, c::T) where {T}
+    N = ops.grid.N; ii = 2:N
+    A = Matrix{T}(I, N-1, N-1) ./ 2 .- c .* ops.D2[ii, ii]
+    syl = SylvesterSolver(A, :ceigen)
+    return HelmholtzSolver{T,typeof(syl)}(N, c, syl, ops.D2[ii, [1, N+1]],
+                                          zeros(T, 2, N-1), zeros(T, N-1, 2), zeros(T, N-1, N-1), zeros(T, N-1, N-1))
 end
 
-function SeparableHelmholtzSolver(ops::CavityOperators{T}, c::T; mode::Symbol = :eigen) where {T}
-    Nx = size(ops.ψ.Dx, 1) - 1; Ny = size(ops.ψ.Dy, 1) - 1
-    ii = 2:Nx; jj = 2:Ny
-    D2x = ops.ψ.D²x; D2y = ops.ψ.D²y
-    A = Matrix{T}(I, Nx-1, Nx-1) ./ 2 .- c .* D2x[ii, ii]
-    B = Matrix{T}(I, Ny-1, Ny-1) ./ 2 .- c .* D2y[jj, jj]
-    syl = SylvesterSolver(A, B; mode)
-    return SeparableHelmholtzSolver{T}(Nx, Ny, c, syl, D2x[ii, [1, Nx+1]], D2y[jj, [1, Ny+1]],
-                                       zeros(T, 2, Ny-1), zeros(T, Nx-1, 2),
-                                       zeros(T, Nx-1, Ny-1), zeros(T, Nx-1, Ny-1))
-end
-
-"""
-    solve_helmholtz_dirichlet!(ω, f, H::SeparableHelmholtzSolver)
-
-Boundary rows/columns of `ω` are the Dirichlet data (input); the interior of
-`ω` is overwritten with the solution.  Only the interior of `f` is read.
-"""
-function solve_helmholtz_dirichlet!(ω::AbstractMatrix{T}, f::AbstractMatrix{T}, H::SeparableHelmholtzSolver{T}) where {T}
-    Nx, Ny, c = H.Nx, H.Ny, H.c
-    ii = 2:Nx; jj = 2:Ny
-    G = H.G
-    G .= view(f, ii, jj)
-    _boundary_rows_cols!(H.Bx, H.By, ω, Nx, Ny)
-    mul!(G, H.Dxx_ib, H.Bx, c, one(T))                 # + c Dx²[ii,b] ω[b,jj]
-    mul!(G, H.By, transpose(H.Dyy_jb), c, one(T))      # + c ω[ii,b] Dy²[jj,b]ᵀ
-    solve!(H.Xi, H.syl, G)
-    view(ω, ii, jj) .= H.Xi
+function helmholtz!(ω::AbstractMatrix{T}, f::AbstractMatrix{T}, H::HelmholtzSolver{T}) where {T}
+    N = H.N; ii = 2:N
+    wall_rows_cols!(H.Bx, H.By, ω, N)
+    H.G .= view(f, ii, ii)
+    mul!(H.G, H.D2_ib, H.Bx, H.c, one(T))
+    mul!(H.G, H.By, transpose(H.D2_ib), H.c, one(T))
+    sylvester_solve!(H.Xi, H.syl, H.G)
+    view(ω, ii, ii) .= H.Xi
     return ω
 end
 
 """
-    SeparablePoissonSolver(ops; mode = :eigen)
+q-Poisson stage:  recover the interior of q from  ω = Δψ = D2q·Q·W + W·Q·D2qᵀ  at interior
+nodes with q|Γ prescribed.  Scaling by Wᵢᵢ⁻¹ on both sides gives the Sylvester form
 
-Solves  Δψ = ω  (plain Chebyshev Laplacian, P_N streamfunction) with ψ|Γ prescribed.
+    (W⁻¹D2q)ᵢᵢ Qᵢ + Qᵢ (W⁻¹D2q)ᵢᵢᵀ = Wᵢᵢ⁻¹ (ωᵢ − D2qᵢ,ᵦ Qᵦ,ᵢ Wᵢᵢ − Wᵢᵢ Qᵢ,ᵦ D2qᵢ,ᵦᵀ) Wᵢᵢ⁻¹.
+
+W⁻¹D2q has a complex spectrum (spurious high modes, κ(V) ~ 1e3), so `backend` matters here:
+:ceigen (complex GEMMs, fast) or :schur (backward stable).
 """
-struct SeparablePoissonSolver{T<:AbstractFloat}
-    Nx::Int; Ny::Int
-    syl::SylvesterSolver{T}
-    Dxx_ib::Matrix{T}; Dyy_jb::Matrix{T}
+struct QPoissonSolver{T<:AbstractFloat, SY<:SylvesterSolver{T}}
+    N::Int
+    syl::SY
+    D2q_ib::Matrix{T}                # D2q[ii, b]
+    wi::Vector{T}                    # interior 1 − x²
     Bx::Matrix{T}; By::Matrix{T}
     G::Matrix{T}; Xi::Matrix{T}
 end
 
-function SeparablePoissonSolver(ops::CavityOperators{T}; mode::Symbol = :eigen) where {T}
-    Nx = size(ops.ψ.Dx, 1) - 1; Ny = size(ops.ψ.Dy, 1) - 1
-    ii = 2:Nx; jj = 2:Ny
-    D2x = ops.ψ.D²x; D2y = ops.ψ.D²y
-    syl = SylvesterSolver(Matrix(D2x[ii, ii]), Matrix(D2y[jj, jj]); mode)
-    return SeparablePoissonSolver{T}(Nx, Ny, syl, D2x[ii, [1, Nx+1]], D2y[jj, [1, Ny+1]],
-                                     zeros(T, 2, Ny-1), zeros(T, Nx-1, 2),
-                                     zeros(T, Nx-1, Ny-1), zeros(T, Nx-1, Ny-1))
+function QPoissonSolver(ops::CavityOperators{T}, backend::Symbol) where {T}
+    N = ops.grid.N; ii = 2:N
+    A = Diagonal(1 ./ ops.w[ii]) * ops.D2q[ii, ii]
+    syl = SylvesterSolver(A, backend)
+    return QPoissonSolver{T,typeof(syl)}(N, syl, ops.D2q[ii, [1, N+1]], ops.w[ii],
+                                         zeros(T, 2, N-1), zeros(T, N-1, 2), zeros(T, N-1, N-1), zeros(T, N-1, N-1))
 end
 
-"""
-    solve_poisson_dirichlet!(ψ, ω, P::SeparablePoissonSolver)
-
-Boundary of `ψ` = Dirichlet data (input); interior overwritten with the solution of
-`Dx² ψ + ψ Dy²ᵀ = ω` at interior nodes.
-"""
-function solve_poisson_dirichlet!(ψ::AbstractMatrix{T}, ω::AbstractMatrix{T}, P::SeparablePoissonSolver{T}) where {T}
-    Nx, Ny = P.Nx, P.Ny
-    ii = 2:Nx; jj = 2:Ny
-    G = P.G
-    G .= view(ω, ii, jj)
-    _boundary_rows_cols!(P.Bx, P.By, ψ, Nx, Ny)
-    mul!(G, P.Dxx_ib, P.Bx, -one(T), one(T))
-    mul!(G, P.By, transpose(P.Dyy_jb), -one(T), one(T))
-    solve!(P.Xi, P.syl, G)
-    view(ψ, ii, jj) .= P.Xi
-    return ψ
-end
-
-"""
-    SeparableQPoissonSolver(ops; mode = :schur)
-
-The *reference-exact* "Poisson" stage: given ω = `laplacian(q, ops)` at interior
-nodes and q|Γ prescribed, recover the interior of q.  The reference operator is
-
-    L q = D²x_q q Wy + Wx q D²y_qᵀ        (Δ of ψ = (1-x²)(1-y²)q, exact polynomial derivative)
-
-whose interior block becomes, after scaling by Wxᵢᵢ⁻¹ (left) and Wyⱼⱼ⁻¹ (right),
-
-    (Wxᵢᵢ⁻¹ D²x_qᵢᵢ) Qᵢ + Qᵢ (Wyⱼⱼ⁻¹ D²y_qⱼⱼ)ᵀ = Wxᵢᵢ⁻¹ (ωᵢ − D²x_qᵢ,ᵦ Qᵦ,ⱼ Wyⱼⱼ − Wxᵢᵢ Qᵢ,ᵦ D²y_qⱼ,ᵦᵀ) Wyⱼⱼ⁻¹.
-
-`Wx⁻¹D²x_q` has a complex spectrum, so the default backend is `:schur`.
-"""
-struct SeparableQPoissonSolver{T<:AbstractFloat}
-    Nx::Int; Ny::Int
-    syl::SylvesterSolver{T}
-    Lx_ib::Matrix{T}      # D²x_q[ii, b]
-    Ly_jb::Matrix{T}      # D²y_q[jj, b]
-    wx_i::Vector{T}; wy_j::Vector{T}          # interior (1-x²), (1-y²)
-    Bx::Matrix{T}; By::Matrix{T}
-    G::Matrix{T}; Xi::Matrix{T}
-end
-
-function SeparableQPoissonSolver(ops::CavityOperators{T}; mode::Symbol = :schur) where {T}
-    Nx = size(ops.ψ.Dx, 1) - 1; Ny = size(ops.ψ.Dy, 1) - 1
-    ii = 2:Nx; jj = 2:Ny
-    wx = ops.q.Wx.diag; wy = ops.q.Wy.diag
-    A = Diagonal(1 ./ wx[ii]) * ops.q.D²x[ii, ii]
-    B = Diagonal(1 ./ wy[jj]) * ops.q.D²y[jj, jj]
-    syl = SylvesterSolver(Matrix(A), Matrix(B); mode)
-    return SeparableQPoissonSolver{T}(Nx, Ny, syl, ops.q.D²x[ii, [1, Nx+1]], ops.q.D²y[jj, [1, Ny+1]],
-                                      wx[ii], wy[jj], zeros(T, 2, Ny-1), zeros(T, Nx-1, 2),
-                                      zeros(T, Nx-1, Ny-1), zeros(T, Nx-1, Ny-1))
-end
-
-"""
-    solve_qpoisson_dirichlet!(q, ω, P::SeparableQPoissonSolver)
-
-Boundary of `q` = Dirichlet data (input); interior of `q` overwritten so that
-`laplacian(q, ops)` equals `ω` at every interior node.
-"""
-function solve_qpoisson_dirichlet!(q::AbstractMatrix{T}, ω::AbstractMatrix{T}, P::SeparableQPoissonSolver{T}) where {T}
-    Nx, Ny = P.Nx, P.Ny
-    ii = 2:Nx; jj = 2:Ny
-    G = P.G
-    G .= view(ω, ii, jj)
-    _boundary_rows_cols!(P.Bx, P.By, q, Nx, Ny)
-    mul!(P.Xi, P.Lx_ib, P.Bx)                     # D²x_q[ii,b] q[b,jj]
-    G .-= P.Xi .* P.wy_j'                         #   … Wy_jj
-    mul!(P.Xi, P.By, transpose(P.Ly_jb))          # q[ii,b] D²y_q[jj,b]ᵀ
-    G .-= P.wx_i .* P.Xi                          # Wx_ii …
-    G .= G ./ P.wx_i ./ P.wy_j'                   # scale by Wx⁻¹ (left), Wy⁻¹ (right)
-    solve!(P.Xi, P.syl, G)
-    view(q, ii, jj) .= P.Xi
+function qpoisson!(q::AbstractMatrix{T}, ω::AbstractMatrix{T}, P::QPoissonSolver{T}) where {T}
+    N = P.N; ii = 2:N; wi = P.wi
+    wall_rows_cols!(P.Bx, P.By, q, N)
+    P.G .= view(ω, ii, ii)
+    mul!(P.Xi, P.D2q_ib, P.Bx);              P.G .-= P.Xi .* wi'       # − D2q[ii,b] Q[b,ii] W
+    mul!(P.Xi, P.By, transpose(P.D2q_ib));   P.G .-= wi .* P.Xi        # − W Q[ii,b] D2q[ii,b]ᵀ
+    P.G .= P.G ./ wi ./ wi'
+    sylvester_solve!(P.Xi, P.syl, P.G)
+    view(q, ii, ii) .= P.Xi
     return q
+end
+
+# wall rows M[[1,N+1], 2:N] → Bx,  wall columns M[2:N, [1,N+1]] → By
+function wall_rows_cols!(Bx, By, M, N)
+    @inbounds for (k, j) in enumerate(2:N)
+        Bx[1, k] = M[1, j];  Bx[2, k] = M[N+1, j]
+        By[k, 1] = M[j, 1];  By[k, 2] = M[j, N+1]
+    end
+    return Bx, By
 end

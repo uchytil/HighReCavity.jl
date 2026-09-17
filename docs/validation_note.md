@@ -1,5 +1,12 @@
 # Influence-matrix reformulation of the Chebyshev lid-driven-cavity solver
 
+> **Scope of this note.** It documents the *development/validation* implementation preserved at
+> Git tag `v0.1.0-validated` (branch `prototype/influence-matrix-validation`): both formulations,
+> both correction methods, the diagnostics, benchmarks and scaling study.  File names in §6 refer
+> to that tag.  The production code on `main` keeps only the `QForm` / Method A / `:ceigen`+`:schur`
+> path described in §2a, with the same numerics, and exposes `Re` based on the full side length
+> L = 2 (`Re_internal = Re/2`; every `Re = 15000` below is the internal value, i.e. public 30 000).
+
 *HighReCavity — technical note (Sept 2026).  Hardware: Apple M2 Max, Julia 1.12.6, OpenBLAS (8 threads), Float64 throughout.*
 
 ## 1. What the reference solver actually solves

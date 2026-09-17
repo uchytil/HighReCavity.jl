@@ -1,39 +1,42 @@
-# HighReCavity
+# HighReCavity.jl
 
-Influence-matrix (streamfunction–vorticity) reformulation of the 2-D lid-driven-cavity Chebyshev
-collocation solver `reference/cavity-flow-spectral-ab2-cn.jl` (kept verbatim).  The dense
-`(N+1)²×(N+1)²` inverse of the reference is replaced by 1-D decompositions plus an `m×m`
-boundary system (`m = 4(N−1)`), reproducing the reference to roundoff.
+2-D lid-driven cavity at high Reynolds number: Chebyshev collocation on an arcsin-mapped grid,
+streamfunction `ψ = (1−x²)(1−y²) q`, AB2/Crank–Nicolson time stepping. The implicit step is
+solved with an influence matrix built from 1-D operator decompositions, so no dense
+`(N+1)²×(N+1)²` operator is ever formed (memory O(N²), ~1–4 ms per step at N = 128 on a laptop).
 
-```bash
-julia --project=. -e 'using Pkg; Pkg.test()'                     # 401 tests
-julia --project=. scripts/compare_reference.jl 128               # validation vs A⁻¹ (N = 32, 64, 128)
-julia --project=. scripts/diagnostics_small_N.jl                 # exact algebra at N = 8
-julia --project=. scripts/run_cavity.jl 128 60000 ceigen         # the reference run, new solver
-
-# benchmarks use the separate `bench` environment (BenchmarkTools); once:
-julia --project=bench -e 'using Pkg; Pkg.develop(path="."); Pkg.instantiate()'
-julia --project=bench bench/benchmark.jl 128                     # per-step benchmark
-julia --project=bench bench/scaling.jl                           # N = 32 … 256
-```
-
-Minimal use:
+The numerics are those of the original dense-inverse solver (`reference/`), reproduced to
+roundoff; see `docs/validation_note.md` and the tag `v0.1.0-validated` for the full validation.
 
 ```julia
 using HighReCavity
-grid = ChebyshevGrid((128, 128), (0.96, 0.96), Float64)
-ops  = CavityOperators(Matrix{Float64}, grid)
-solver = InfluenceSolver(QForm, grid, ops, 0.0005, 15000.0; poisson_mode = :ceigen)  # :schur = default
-st = QState(solver)                       # q with lid data, q_prev = 0 (as the reference)
-for n in 1:1000
-    step_influence!(st, solver)           # st.q, st.q_prev, st.ω
-end
-ψ = streamfunction_from_q(st.q, ops); u, v = velocity(st.q, ops)
+
+params = CavityParameters(N = 128, Re = 30_000, dt = 5e-4, alpha = 0.96, backend = :ceigen)
+sim = CavitySimulation(params)          # grid, operators, decompositions, influence matrix
+
+run!(sim, 20_000)                                                # transient, nothing stored
+run!(sim, 40_000; every = 200, callback = s -> process(s))      # production interval
+step!(sim)                                                       # single step
+
+sim.q                       # state, ψ = (1−x²)(1−y²) q
+streamfunction(sim)         # Ψ = W q W
+vorticity(sim)              # ω = Δψ (exact product-rule operators)
+velocity(sim)               # (u, v) = (ψ_y, −ψ_x)
 ```
 
-See `notes/technical_note.md` for the mathematics (exact equivalence with the reference,
-corner/rank analysis, why the textbook nodal ψ–ω formulation is a different discretization) and the
-measured performance.
+**Reynolds number.** `Re` is based on the full cavity side length `L = 2` (cavity `[-1,1]²`,
+lid speed `max (1−x²)² = 1`). The operators are written in half-width units, so the solver uses
+`Re_internal = Re/2` internally (`reynolds_internal(params)`); `Re = 30_000` reproduces the
+original script's `Re = 30000/2`.
+
+**Backends.** `:ceigen` (default): complex eigendecompositions, 4 GEMMs per Sylvester solve.
+`:schur`: real Schur + LAPACK `trsyl`, backward stable, ~4× slower; useful as a cross-check.
+
+Layout: `src/chebyshev.jl` (grid, differentiation), `src/operators.jl` (q-operators, fields),
+`src/sylvester.jl` (Helmholtz / q-Poisson interior solves), `src/influence.jl` (influence
+matrix, one implicit solve), `src/simulation.jl` (parameters, `step!`, `run!`).
+Tests: `julia --project=. -e 'using Pkg; Pkg.test()'` (dense equivalence at N = 8/12, trajectories
+vs the preserved implementation, boundary conditions, backend agreement, Re convention).
 
 ## License
 
