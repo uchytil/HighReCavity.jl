@@ -1,0 +1,15 @@
+# Julia
+Manifest.toml
+bench/Manifest.toml
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+/docs/build/
+
+# run outputs
+results/
+*.jls
+
+# OS / editor
+.DS_Store
+.vscode/

@@ -1,0 +1,64 @@
+BLAS threads: 8  (/Users/uchytada/.julia/juliaup/julia-1.12.6+0.aarch64.apple.darwin14/lib/julia/libopenblas64_.dylib)
+====================================================================================================
+N = 32   ((N+1)² = 1089 unknowns)
+init   inv(A) (incl. assembly):     0.58 s   memory Ainv 0.009 GB (+A 0.009 GB)
+init   lu(A):                       0.03 s   memory LU   0.009 GB
+init   influence (Method A):        1.49 s   memory      0.5 MB
+init   influence (Method B):        0.02 s   memory      2.6 MB  (Rω, Rq: 2.1 MB)
+per-step linear solve:
+  1. Ainv * rhs (GEMV)                     0.262 ms  (min    0.184 ms, allocs      0,      0.0 KiB)
+  2. LU triangular solves                  0.239 ms  (min    0.224 ms, allocs      0,      0.0 KiB)
+  3. influence, fresh solves (A)           0.128 ms  (min    0.114 ms, allocs      0,      0.0 KiB)
+  4. influence, response GEMV (B)          0.111 ms  (min    0.107 ms, allocs      2,      0.1 KiB)
+other:
+  explicit RHS (in-place)                  0.057 ms  (min    0.052 ms, allocs      0,      0.0 KiB)
+  full reference step (alloc. RHS+inv)     0.434 ms  (min    0.206 ms, allocs    182,    566.3 KiB)
+  full influence step, Method A            0.175 ms  (min    0.166 ms, allocs      0,      0.0 KiB)
+  full influence step, Method B            0.172 ms  (min    0.160 ms, allocs      2,      0.1 KiB)
+Method A breakdown (each done twice per step):
+  Helmholtz (eigen, 4 GEMM)                0.011 ms  (min    0.010 ms, allocs      0,      0.0 KiB)
+  q-Poisson (Schur, 4 GEMM + trsyl)        0.043 ms  (min    0.043 ms, allocs      0,      0.0 KiB)
+  closure  (wall laplacian)                0.004 ms  (min    0.004 ms, allocs      0,      0.0 KiB)
+  influence LU solve (m=124)                0.004 ms  (min    0.004 ms, allocs      0,      0.0 KiB)
+====================================================================================================
+N = 64   ((N+1)² = 4225 unknowns)
+init   inv(A) (incl. assembly):     1.71 s   memory Ainv 0.133 GB (+A 0.133 GB)
+init   lu(A):                       0.22 s   memory LU   0.133 GB
+init   influence (Method A):        0.15 s   memory      2.0 MB
+init   influence (Method B):        0.12 s   memory      18.3 MB  (Rω, Rq: 16.2 MB)
+per-step linear solve:
+  1. Ainv * rhs (GEMV)                     2.939 ms  (min    2.315 ms, allocs      0,      0.0 KiB)
+  2. LU triangular solves                  5.366 ms  (min    5.252 ms, allocs   3183,    166.2 KiB)
+  3. influence, fresh solves (A)           0.754 ms  (min    0.744 ms, allocs      0,      0.0 KiB)
+  4. influence, response GEMV (B)          0.648 ms  (min    0.608 ms, allocs      2,      0.1 KiB)
+other:
+  explicit RHS (in-place)                  0.302 ms  (min    0.300 ms, allocs      0,      0.0 KiB)
+  full reference step (alloc. RHS+inv)     3.308 ms  (min    2.402 ms, allocs    182,   2695.8 KiB)
+  full influence step, Method A            1.077 ms  (min    1.045 ms, allocs      0,      0.0 KiB)
+  full influence step, Method B            0.981 ms  (min    0.875 ms, allocs      2,      0.1 KiB)
+Method A breakdown (each done twice per step):
+  Helmholtz (eigen, 4 GEMM)                0.065 ms  (min    0.064 ms, allocs      0,      0.0 KiB)
+  q-Poisson (Schur, 4 GEMM + trsyl)        0.297 ms  (min    0.292 ms, allocs      0,      0.0 KiB)
+  closure  (wall laplacian)                0.015 ms  (min    0.015 ms, allocs      0,      0.0 KiB)
+  influence LU solve (m=252)                0.014 ms  (min    0.014 ms, allocs      0,      0.0 KiB)
+====================================================================================================
+N = 128   ((N+1)² = 16641 unknowns)
+init   inv(A) (incl. assembly):    71.42 s   memory Ainv 2.063 GB (+A 2.063 GB)
+init   lu(A):                      12.09 s   memory LU   2.063 GB
+init   influence (Method A):        1.27 s   memory      8.1 MB
+init   influence (Method B):        1.38 s   memory      137.1 MB  (Rω, Rq: 129.0 MB)
+per-step linear solve:
+  1. Ainv * rhs (GEMV)                    29.822 ms  (min   26.909 ms, allocs      0,      0.0 KiB)
+  2. LU triangular solves                 84.205 ms  (min   82.690 ms, allocs      0,      0.0 KiB)
+  3. influence, fresh solves (A)           4.630 ms  (min    4.504 ms, allocs      0,      0.0 KiB)
+  4. influence, response GEMV (B)          4.327 ms  (min    4.041 ms, allocs      2,      0.1 KiB)
+other:
+  explicit RHS (in-place)                  0.587 ms  (min    0.541 ms, allocs      0,      0.0 KiB)
+  full reference step (alloc. RHS+inv)    31.836 ms  (min   29.026 ms, allocs    182,   8075.0 KiB)
+  full influence step, Method A            5.680 ms  (min    5.185 ms, allocs      0,      0.0 KiB)
+  full influence step, Method B            6.005 ms  (min    4.922 ms, allocs      2,      0.1 KiB)
+Method A breakdown (each done twice per step):
+  Helmholtz (eigen, 4 GEMM)                0.189 ms  (min    0.168 ms, allocs      0,      0.0 KiB)
+  q-Poisson (Schur, 4 GEMM + trsyl)        2.058 ms  (min    2.012 ms, allocs      0,      0.0 KiB)
+  closure  (wall laplacian)                0.067 ms  (min    0.067 ms, allocs      0,      0.0 KiB)
+  influence LU solve (m=508)                0.054 ms  (min    0.050 ms, allocs      0,      0.0 KiB)
