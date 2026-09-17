@@ -1,18 +1,24 @@
-# Discrete operators of the q formulation.
+# Spectral operators of the q representation.
 #
-# The streamfunction is represented as  ψ = (1−x²)(1−y²) q,  Ψ = W Q W  with W = diag(1−x²).
-# All x-derivatives act from the left (D·Q), all y-derivatives from the right (Q·Dᵀ);
-# Q[i, j] = q(x_i, y_j).  Derivatives of ψ are taken by the product rule *exactly* (this is
-# what makes the formulation different from a nodal ψ–ω method and must be preserved):
+# The streamfunction is  ψ = (1−x²)(1−y²) q,  i.e.  Ψ = W Q W  with W = diag(1−x²), so that
+# ψ = 0 on all four walls for every q, and the wall values of q carry the normal derivative:
+# ∂ₙψ = −2(1−x²) q on y = ±1 and −2(1−y²) q on x = ±1.
+#
+# Conventions: Q[i, j] = q(x_i, y_j); x-derivatives act from the left (D·Q), y-derivatives
+# from the right (Q·Dᵀ).  Derivatives of ψ are formed by the product rule applied to
+# (1−x²) q(x), with q differentiated by the collocation matrices:
 #
 #   ∂x[(1−x²)q]   = (1−x²) q'   − 2x q             → Dq  = W D1 − 2X
 #   ∂xx[(1−x²)q]  = (1−x²) q''  − 4x q'  − 2q      → D2q = W D2 − 4X D1 − 2I
 #   ∂⁴x[(1−x²)q]  = (1−x²) q'''' − 8x q''' − 12q''  → D4q = W D2² − 8X D2 D1 − 12 D2
+#
+# Fields derived from q (ψ_x, ψ_y, Δψ, Δ²ψ) are thus derivatives of the polynomial ψ itself,
+# including on the walls, where they reduce to −2xq, −4xq' − 2q, … .
 
 struct CavityOperators{T<:AbstractFloat}
     grid::ChebyshevGrid{T}
-    D1::Matrix{T}         # plain Chebyshev d/dx
-    D2::Matrix{T}         # plain Chebyshev d²/dx²  (the Laplacian acting on ω is D2·Ω + Ω·D2ᵀ)
+    D1::Matrix{T}         # Chebyshev d/dx on nodal values
+    D2::Matrix{T}         # Chebyshev d²/dx²; the Laplacian of a nodal field F is D2·F + F·D2ᵀ
     Dq::Matrix{T}         # product-rule operators acting on q (see above)
     D2q::Matrix{T}
     D4q::Matrix{T}
@@ -34,7 +40,7 @@ end
 # ---------------------------------------------------------------------------------------
 
 """
-    laplacian!(ω, q, ops, tmp)  —  ω = Δψ = D2q·Q·W + W·Q·D2qᵀ
+    laplacian!(ω, q, ops, tmp)  —  ω = Δψ = D2q·Q·W + W·Q·D2qᵀ   (vorticity of the state q)
 """
 function laplacian!(ω, q, ops::CavityOperators, tmp)
     w = ops.w
@@ -44,8 +50,10 @@ function laplacian!(ω, q, ops::CavityOperators, tmp)
 end
 
 """
-    biharmonic!(B, q, ops, tmp1, tmp2)  —  B = ψ_xxxx + ψ_yyyy + 2ψ_xxyy
+    biharmonic!(B, q, ops, tmp1, tmp2)  —  B = Δ²ψ = ψ_xxxx + ψ_yyyy + 2ψ_xxyy
                                              = D4q·Q·W + W·Q·D4qᵀ + D2·(W·Q·D2qᵀ) + (D2q·Q·W)·D2ᵀ
+
+The mixed term 2ψ_xxyy is obtained by applying the plain second derivative to ψ_yy and ψ_xx.
 """
 function biharmonic!(B, q, ops::CavityOperators, tmp1, tmp2)
     w = ops.w
@@ -59,6 +67,8 @@ end
 """
     convection!(C, q, ops, W)  —  C = u ω_x + v ω_y   with  u = ψ_y = W·Q·Dqᵀ,  v = −ψ_x = −Dq·Q·W,
                                    ω = Δψ (laplacian!),  ω_x = D1·Ω,  ω_y = Ω·D1ᵀ
+
+`W` is a `Workspace`; its arrays A, B, C, u, v are used as scratch.
 """
 function convection!(C, q, ops::CavityOperators, W)
     w = ops.w
@@ -72,8 +82,16 @@ function convection!(C, q, ops::CavityOperators, W)
 end
 
 # ---------------------------------------------------------------------------------------
-# Allocating post-processing versions (same operators)
+# Physical fields from q (allocating; post-processing)
 # ---------------------------------------------------------------------------------------
+"""
+    streamfunction(q, ops) -> Ψ       nodal values of ψ = (1−x²)(1−y²) q
+    vorticity(q, ops)      -> Ω       ω = Δψ
+    velocity(q, ops)       -> (U, V)  u = ψ_y, v = −ψ_x
+
+All are (N+1)×(N+1) arrays indexed [i, j] ↔ (x_i, y_j).  The same functions accept a
+`CavitySimulation` in place of `(q, ops)`.
+"""
 streamfunction(q::AbstractMatrix, ops::CavityOperators) = ops.w .* q .* ops.w'
 vorticity(q::AbstractMatrix, ops::CavityOperators) = laplacian!(similar(q), q, ops, similar(q))
 function velocity(q::AbstractMatrix, ops::CavityOperators)
@@ -83,11 +101,11 @@ function velocity(q::AbstractMatrix, ops::CavityOperators)
 end
 
 """
-    lid_boundary_values(ops) -> g  (vector in BoundaryLayout order)
+    lid_boundary_values(ops, L) -> g  (vector in `BoundaryLayout` order)
 
-Dirichlet data for q: zero on the left/right/bottom walls, −½(1−x²) on the lid.  In the
-polynomial sense ψ_y|_{y=1} = −2(1−x²) q(x,1) = (1−x²)², i.e. the regularised lid velocity
-u(x, 1) = (1−x²)²; the corner values are irrelevant (see BoundaryLayout).
+Wall values of q: zero on the left, right and bottom walls (no slip) and −½(1−x²) on the
+lid, so that u(x, 1) = ψ_y = −2(1−x²) q(x, 1) = (1−x²)², a regularised lid velocity that
+vanishes at the corners.  Corner values are not part of `g` (see `BoundaryLayout`).
 """
 function lid_boundary_values(ops::CavityOperators{T}, L) where {T}
     g = zeros(T, L.m)

@@ -1,20 +1,23 @@
-# Influence-matrix solve of one implicit step (Method A: fresh re-solve after the boundary
-# correction).  With c = dt/(2 Re_internal) and ω := Δψ = L q, the implicit system is
+# Influence-matrix solution of one implicit step.
+#
+# With c = dt/(2 Re_internal) and the vorticity ω := Δψ = L q as auxiliary unknown, the
+# implicit step  (I − cΔ) L q = f  is split into
 #
 #     (I − cΔ) ω = f      at interior nodes                          (Helmholtz stage)
 #     L q = ω              at interior nodes,   q|Γ = g (lid data)   (q-Poisson stage)
 #     (L q)|Γ = ω|Γ        wall-vorticity consistency                (closure)
 #
-# The unknown wall vorticity ξ = ω|Γ (m = 4(N−1) non-corner wall values) enters linearly:
-# (L q)|Γ = d₀ + Cξ, so the closure is  (C − I) ξ = −d₀.  The m×m matrix  M = C − I  is built
-# once from unit responses and LU-factorized; it equals −I + O(c) and is nonsingular exactly
-# when the original dense system is.  The no-slip condition is imposed through q|Γ = g,
-# because in this representation ∂ₙψ = −2(1−x²) q|Γ exactly.
+# The first two are separable Dirichlet problems once the wall vorticity ξ = ω|Γ (m = 4(N−1)
+# non-corner wall values) is known.  Their solution is affine in ξ, (L q)|Γ = d₀ + Cξ, so the
+# closure is the m×m system  (C − I) ξ = −d₀.  The matrix M = C − I is assembled once from the
+# unit responses ξ = e_k and LU-factorized; it equals −I + O(c).  The no-slip condition is
+# carried entirely by q|Γ = g, since ∂ₙψ = −2(1−x²) q|Γ in this representation.
 
 """
-Ordered non-corner wall nodes: left (1, 2:N), right (N+1, 2:N), bottom (2:N, 1), top (2:N, N+1).
-Corners are excluded: no interior stencil touches them, L q vanishes there, and q's corner
-values never enter any equation.
+Ordered non-corner wall nodes: left (1, 2:N), right (N+1, 2:N), bottom (2:N, 1), top (2:N, N+1);
+`m = 4(N−1)` is the number of wall unknowns.  Corners are excluded: no interior collocation
+equation involves a corner value (D2 acts on columns 2:N and on rows 2:N), L q vanishes
+identically at the corners (W = 0 in both directions), and corner values of q enter no equation.
 """
 struct BoundaryLayout
     N::Int
@@ -50,8 +53,9 @@ end
 """
     wall_laplacian!(d, q, ops, L)  —  d = (L q)|Γ,  the wall rows/columns of  D2q·Q·W + W·Q·D2qᵀ
 
-O(N²): at a wall only the derivative *normal* to it survives because W = 0 there (the
-W-weighted terms are kept so that this is exactly the wall part of `laplacian!`).
+O(N²) work.  At a wall only the derivative normal to it survives, because W = 0 there; the
+W-weighted tangential terms are nevertheless kept so that `d` is exactly the wall part of
+`laplacian!`.
 """
 function wall_laplacian!(d::AbstractVector{T}, q::AbstractMatrix{T}, ops::CavityOperators{T}, L::BoundaryLayout) where {T}
     N = L.N; D2q = ops.D2q; w = ops.w
@@ -69,18 +73,20 @@ struct InfluenceSolver{T<:AbstractFloat, H<:HelmholtzSolver{T}, P<:QPoissonSolve
     layout::BoundaryLayout
     helm::H
     pois::P
-    g::Vector{T}                    # lid data q|Γ
+    g::Vector{T}                    # wall values of q (lid data)
     M::Matrix{T}                    # influence matrix  C − I
     Mlu::LU{T,Matrix{T},Vector{Int}}
     condM::T                        # condition number of M (diagnostic)
-    ξ::Vector{T}; d::Vector{T}      # wall vorticity, closure residual
-    zero_f::Matrix{T}               # f = 0 for the unit responses
+    ξ::Vector{T}; d::Vector{T}      # wall vorticity; wall values of L q
+    zero_f::Matrix{T}               # f = 0, used when computing the unit responses
 end
 
 """
-    InfluenceSolver(ops, c; backend)   with  c = dt / (2 Re_internal)
+    InfluenceSolver(ops, c; backend = :ceigen)
 
-Builds the Helmholtz and q-Poisson decompositions (`backend` selects the latter) and the influence matrix
+Precomputes everything the implicit step needs for the diffusion coefficient `c`
+(= dt/(2 Re_internal)): the Helmholtz and q-Poisson decompositions (`backend` selects the
+latter, `:ceigen` or `:schur`), the wall data `g`, and the LU-factorized influence matrix
 M[:, k] = (L q⁽ᵏ⁾)|Γ − e_k, where (ω⁽ᵏ⁾, q⁽ᵏ⁾) is the response to f = 0, ω|Γ = e_k, q|Γ = 0.
 """
 function InfluenceSolver(ops::CavityOperators{T}, c::T; backend::Symbol = :ceigen) where {T}
@@ -107,22 +113,24 @@ function InfluenceSolver(ops::CavityOperators{T}, c::T; backend::Symbol = :ceige
 end
 
 """
-    influence_solve!(q, ω, f, S)
+    influence_solve!(q, ω, f, S) -> (q, ω)
 
-Given the explicit right-hand side f (interior values), computes q^{n+1} (interior; walls set
-to the lid data) and the corresponding vorticity ω = L q (all nodes, corners zero).
+Solves the implicit step  (I − cΔ) L q = f  (interior values of `f` are used) with the wall
+data q|Γ = g.  On return `q` holds the new state and `ω = L q` its vorticity at all nodes
+(corners zero).  Both arrays are overwritten; their input values are not used.
 """
 function influence_solve!(q::AbstractMatrix{T}, ω::AbstractMatrix{T}, f::AbstractMatrix{T}, S::InfluenceSolver{T}) where {T}
     L = S.layout; ξ = S.ξ; d = S.d
-    # 1. particular solution with zero wall vorticity → closure residual d₀ = (L q₀)|Γ
+    # 1. solve with zero wall vorticity: (I − cΔ) ω₀ = f, ω₀|Γ = 0;  L q₀ = ω₀, q₀|Γ = g.
+    #    d₀ = (L q₀)|Γ is the wall vorticity implied by this solution.
     ξ .= 0
     set_walls!(ω, ξ, L);    helmholtz!(ω, f, S.helm)
     set_walls!(q, S.g, L);  qpoisson!(q, ω, S.pois)
     wall_laplacian!(d, q, S.ops, L)
-    # 2. wall vorticity from the closure  (C − I) ξ = −d₀
+    # 2. choose ξ so that ω = L q also holds on the walls:  (C − I) ξ = −d₀
     ξ .= .-d
     ldiv!(S.Mlu, ξ)
-    # 3. re-solve with the correct wall vorticity (Method A)
+    # 3. solve again with ω|Γ = ξ
     set_walls!(ω, ξ, L);    helmholtz!(ω, f, S.helm)
     set_walls!(q, S.g, L);  qpoisson!(q, ω, S.pois)
     return q, ω

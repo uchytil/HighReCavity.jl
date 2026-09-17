@@ -1,16 +1,17 @@
-# Interior Dirichlet solves as Sylvester equations  A X + X Bᵀ = G  on the (N−1)² interior
-# nodes, using precomputed decompositions of the two 1-D operators only.  Nothing of size
-# (N+1)²×(N+1)² is ever formed.
+# Interior Dirichlet problems as Sylvester equations.
 #
-# The cavity is square, so the same 1-D operator A appears on both sides:  A X + X Aᵀ = G.
+# A separable operator  X ↦ A·X + X·Aᵀ  (the same 1-D operator in x and y on the square grid)
+# restricted to the (N−1)² interior nodes is inverted through a precomputed decomposition of
+# the (N−1)×(N−1) matrix A:
 #
 #   :ceigen  A = V Λ V⁻¹ (eigendecomposition):
-#            X = V [ (V⁻¹ G V⁻ᵀ) ./ (λ_i + λ_j) ] Vᵀ                    4 GEMMs
-#            Real arithmetic when the spectrum is real (Helmholtz stage: ½I − cD2, κ(V) ≈ 2),
-#            complex otherwise (q-Poisson stage: W⁻¹D2q has spurious complex high modes).
-#   :schur   A = Z T Zᵀ (real Schur, Bartels–Stewart):
-#            T Ŷ + Ŷ Tᵀ = Zᵀ G Z  (LAPACK trsyl),  X = Z Ŷ Zᵀ           4 GEMMs + trsyl
-#            Backward stable regardless of κ(V); ~4× slower because trsyl is unblocked.
+#            X = V [ (V⁻¹ G V⁻ᵀ) ./ (λ_i + λ_j) ] Vᵀ                    4 matrix products
+#            Real arithmetic when the spectrum is real (Helmholtz operator ½I − cD2, κ(V) ≈ 2),
+#            complex otherwise (q-Poisson operator W⁻¹D2q, whose highest modes are complex).
+#            Accuracy is governed by κ(V)·ε.
+#   :schur   A = Z T Zᵀ (real Schur form, Bartels–Stewart):
+#            T Ŷ + Ŷ Tᵀ = Zᵀ G Z  (LAPACK trsyl),  X = Z Ŷ Zᵀ           4 matrix products + trsyl
+#            Backward stable independently of κ(V); slower, since trsyl is an unblocked routine.
 
 struct SylvesterSolver{T<:AbstractFloat, S<:Union{T, Complex{T}}}
     backend::Symbol
@@ -82,8 +83,8 @@ struct HelmholtzSolver{T<:AbstractFloat, SY<:SylvesterSolver{T}}
     G::Matrix{T}; Xi::Matrix{T}      # interior work
 end
 
-# The Helmholtz operator has a real, well-conditioned spectrum, so it always uses the eigen path
-# (as in the validated implementation); `backend` only selects the q-Poisson stage.
+# The Helmholtz operator has a real, well-conditioned spectrum, so it always uses the
+# eigendecomposition; the `backend` parameter selects the q-Poisson stage only.
 function HelmholtzSolver(ops::CavityOperators{T}, c::T) where {T}
     N = ops.grid.N; ii = 2:N
     A = Matrix{T}(I, N-1, N-1) ./ 2 .- c .* ops.D2[ii, ii]
@@ -109,8 +110,8 @@ nodes with q|Γ prescribed.  Scaling by Wᵢᵢ⁻¹ on both sides gives the Syl
 
     (W⁻¹D2q)ᵢᵢ Qᵢ + Qᵢ (W⁻¹D2q)ᵢᵢᵀ = Wᵢᵢ⁻¹ (ωᵢ − D2qᵢ,ᵦ Qᵦ,ᵢ Wᵢᵢ − Wᵢᵢ Qᵢ,ᵦ D2qᵢ,ᵦᵀ) Wᵢᵢ⁻¹.
 
-W⁻¹D2q has a complex spectrum (spurious high modes, κ(V) ~ 1e3), so `backend` matters here:
-:ceigen (complex GEMMs, fast) or :schur (backward stable).
+W⁻¹D2q has a complex spectrum (its highest modes) with κ(V) ~ 1e3, so the choice of `backend`
+matters here: :ceigen (complex eigendecomposition) or :schur (backward stable).
 """
 struct QPoissonSolver{T<:AbstractFloat, SY<:SylvesterSolver{T}}
     N::Int

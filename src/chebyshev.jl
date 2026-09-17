@@ -1,10 +1,16 @@
-# Mapped Chebyshev–Gauss–Lobatto grid and differentiation matrices (1-D; the square
-# cavity uses the same grid in x and y).  Arithmetic identical to the original solver.
+# Mapped Chebyshev–Gauss–Lobatto grid and differentiation matrices in one dimension; the
+# square cavity uses the same grid in x and y.
+#
+# The Gauss–Lobatto nodes η_k = −cos(πk/N) cluster like O(N⁻²) at the ends of [−1, 1].  The
+# Kosloff–Tal-Ezer mapping  x = asin(αη)/asin(α),  0 ≤ α < 1,  spreads the nodes near the walls
+# (spacing → O(N⁻¹) as α → 1).  The mapping is analytic only for |αη| < 1, so α close to 1
+# trades convergence rate for a milder explicit time-step restriction.  α = 0 gives the
+# unmapped Chebyshev grid.
 
 struct ChebyshevGrid{T<:AbstractFloat}
     N::Int
     η::Vector{T}     # Gauss–Lobatto nodes  η_k = −cos(πk/N),  k = 0..N   (−1 … 1)
-    x::Vector{T}     # mapped nodes  x = asin(αη)/asin(α)  (α = 0: x = η); clusters less at the walls
+    x::Vector{T}     # mapped nodes  x = asin(αη)/asin(α)  (α = 0: x = η)
     α::T
 end
 
@@ -17,8 +23,9 @@ end
 """
     diff_matrices(grid) -> (D1, D2)
 
-First- and second-derivative matrices in the physical coordinate x.  Standard Chebyshev
-matrix in η, chain rule through the mapping (d/dx = (dη/dx) d/dη), D2 = D1².
+Collocation derivative matrices in the physical coordinate x, acting on nodal values: the
+standard Chebyshev differentiation matrix in η, scaled row-wise by dη/dx (chain rule through
+the mapping), and D2 = D1·D1.
 """
 function diff_matrices(grid::ChebyshevGrid{T}) where {T}
     N = grid.N; η = grid.η; α = grid.α
@@ -37,8 +44,9 @@ end
 """
     interp_matrix(x_target, grid) -> M
 
-Barycentric interpolation from the grid nodes to arbitrary points in [-1, 1]
-(post-processing / plotting only).
+Barycentric interpolation matrix from the grid nodes to arbitrary points `x_target` in
+[-1, 1]: values at the targets are `M * values_at_nodes`.  For a 2-D field F on the grid,
+`Mx * F * My'` evaluates it on the tensor grid of the targets (e.g. for plotting).
 """
 function interp_matrix(x_target::AbstractVector{T}, grid::ChebyshevGrid{T}) where {T}
     N = grid.N; η = grid.η; α = grid.α
