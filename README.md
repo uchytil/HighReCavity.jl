@@ -1,8 +1,8 @@
 # HighReCavity.jl
 
 A Chebyshev collocation solver for the two-dimensional lid-driven cavity at high Reynolds
-number, in streamfunction–vorticity form. Long time integrations are the intended use: the
-solver keeps only the current state and processes it through a callback.
+number, in streamfunction–vorticity form, with semi-implicit (Crank–Nicolson /
+Adams–Bashforth) time stepping.
 
 ```julia
 using HighReCavity
