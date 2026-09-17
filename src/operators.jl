@@ -15,6 +15,12 @@
 # Fields derived from q (ψ_x, ψ_y, Δψ, Δ²ψ) are thus derivatives of the polynomial ψ itself,
 # including on the walls, where they reduce to −2xq, −4xq' − 2q, … .
 
+"""
+    CavityOperators(grid)
+
+Collocation derivative matrices `D1`, `D2` on the grid, the product-rule operators `Dq`,
+`D2q`, `D4q` acting on q (see the file header), and the weight `w = 1 − x²`.
+"""
 struct CavityOperators{T<:AbstractFloat}
     grid::ChebyshevGrid{T}
     D1::Matrix{T}         # Chebyshev d/dx on nodal values
@@ -85,15 +91,29 @@ end
 # Physical fields from q (allocating; post-processing)
 # ---------------------------------------------------------------------------------------
 """
-    streamfunction(q, ops) -> Ψ       nodal values of ψ = (1−x²)(1−y²) q
-    vorticity(q, ops)      -> Ω       ω = Δψ
-    velocity(q, ops)       -> (U, V)  u = ψ_y, v = −ψ_x
+    streamfunction(q, ops)
+    streamfunction(sim)
 
-All are (N+1)×(N+1) arrays indexed [i, j] ↔ (x_i, y_j).  The same functions accept a
-`CavitySimulation` in place of `(q, ops)`.
+Nodal values of the streamfunction ψ = (1−x²)(1−y²) q, as an (N+1)×(N+1) array indexed
+[i, j] ↔ (x_i, y_j).
 """
 streamfunction(q::AbstractMatrix, ops::CavityOperators) = ops.w .* q .* ops.w'
+
+"""
+    vorticity(q, ops)
+    vorticity(sim)
+
+Vorticity ω = Δψ at the nodes, (N+1)×(N+1), indexed [i, j] ↔ (x_i, y_j).
+"""
 vorticity(q::AbstractMatrix, ops::CavityOperators) = laplacian!(similar(q), q, ops, similar(q))
+
+"""
+    velocity(q, ops) -> (u, v)
+    velocity(sim)    -> (u, v)
+
+Velocity components u = ψ_y, v = −ψ_x at the nodes, each (N+1)×(N+1), indexed
+[i, j] ↔ (x_i, y_j).
+"""
 function velocity(q::AbstractMatrix, ops::CavityOperators)
     u = ops.w .* (q * transpose(ops.Dq))          # u =  ψ_y
     v = .-((ops.Dq * q) .* ops.w')                # v = −ψ_x

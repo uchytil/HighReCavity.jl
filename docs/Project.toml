@@ -1,0 +1,6 @@
+[deps]
+Documenter = "e30172f5-a6a5-5a46-863b-614d45cd2de4"
+HighReCavity = "cf9b0ca7-be42-41ce-8221-1e9c8616714a"
+
+[compat]
+Documenter = "1"

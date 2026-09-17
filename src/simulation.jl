@@ -36,8 +36,13 @@ function CavityParameters(; N::Int, Re, dt, alpha = 0.96, backend::Symbol = :cei
     return CavityParameters{T}(N, T(Re), T(dt), T(alpha), backend)
 end
 
-# The operators use the cavity half-width as length scale; the public Re uses the full side
-# length L = 2, so the Reynolds number in operator units is Re / 2 (viscosity ν = 2/Re).
+"""
+    reynolds_internal(params)
+
+Reynolds number in the units of the discrete operators.  The operators use the cavity
+half-width as length scale while `params.Re` uses the full side length L = 2, so this is
+`Re / 2` (kinematic viscosity ν = 2/Re).
+"""
 reynolds_internal(p::CavityParameters) = p.Re / 2
 
 "Diffusion coefficient of the implicit step, c = ν dt / 2 = dt / (2 Re_internal)."
@@ -138,4 +143,11 @@ end
 streamfunction(sim::CavitySimulation) = streamfunction(sim.q, sim.ops)
 vorticity(sim::CavitySimulation) = vorticity(sim.q, sim.ops)
 velocity(sim::CavitySimulation) = velocity(sim.q, sim.ops)
+
+"""
+    grid(sim) -> ChebyshevGrid
+
+The one-dimensional grid of the simulation; `grid(sim).x` are the node coordinates, used in
+both directions.
+"""
 grid(sim::CavitySimulation) = sim.ops.grid

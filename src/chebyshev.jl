@@ -7,6 +7,13 @@
 # trades convergence rate for a milder explicit time-step restriction.  α = 0 gives the
 # unmapped Chebyshev grid.
 
+"""
+    ChebyshevGrid(N, α)
+
+One-dimensional mapped Chebyshev–Gauss–Lobatto grid with `N+1` nodes: `η` are the
+Gauss–Lobatto nodes −cos(πk/N) and `x = asin(αη)/asin(α)` the physical nodes, 0 ≤ `α` < 1
+(`α = 0`: unmapped).  The cavity uses the same grid in both directions.
+"""
 struct ChebyshevGrid{T<:AbstractFloat}
     N::Int
     η::Vector{T}     # Gauss–Lobatto nodes  η_k = −cos(πk/N),  k = 0..N   (−1 … 1)
