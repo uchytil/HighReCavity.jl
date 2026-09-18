@@ -97,7 +97,7 @@ implicit weight, so one influence solver (Section 5) serves the whole step. Here
 ``\mathcal N = u\,\omega_x + v\,\omega_y`` and ``\Delta`` on the left-hand side is the collocation
 Laplacian ``D_2\,\Omega + \Omega\,D_2^{\mathsf T}`` acting on the nodal vorticity.
 
-**CNAB2** (default): Crank–Nicolson for diffusion (``\gamma = 1/2``) and second-order
+**CNAB2**: Crank–Nicolson for diffusion (``\gamma = 1/2``) and second-order
 Adams–Bashforth for convection,
 
 ```math
@@ -112,7 +112,7 @@ viscous term uses the product-rule ``\Delta^2\psi`` while the implicit one uses 
 Laplacian of ``\omega``; on the mapped grid these differ by the truncation error of the mapping
 (a few ``10^{-6}`` relative in ``\omega`` at ``N = 192``, ``Re = 30\,000``).
 
-**ARK3**: the additive Runge–Kutta scheme ARK3(2)4L[2]SA of Kennedy & Carpenter (2003): four
+**ARK3** (default): the additive Runge–Kutta scheme ARK3(2)4L[2]SA of Kennedy & Carpenter (2003): four
 stages, third order, an L-stable, stiffly accurate ESDIRK implicit part with a single diagonal
 coefficient ``\gamma = 0.4358665\ldots``, and an explicit part sharing the weights ``b``. Stage
 ``i`` solves
@@ -139,9 +139,9 @@ In either case the step is
 ```
 
 and the step size ``\mathrm{dt}`` is limited by the explicit convection term (the diffusion term is
-unconditionally stable). At ``N = 192``, ``Re = 30\,000``, CNAB2 is stable up to
-``\mathrm{dt} \approx 4\cdot10^{-3}`` and ARK3 up to ``\approx 1.2\cdot10^{-2}`` from a developed state; the
-impulsive start needs a smaller step for the first few time units.
+unconditionally stable). At ``N = 192``, ``Re = 30\,000``, ARK3 is stable up to
+``\mathrm{dt} \approx 1.2\cdot10^{-2}`` (also through the impulsive start) and CNAB2 up to
+``\approx 4\cdot10^{-3}`` from a developed state (``2\cdot10^{-3}`` through the impulsive start).
 
 ## The implicit solve
 

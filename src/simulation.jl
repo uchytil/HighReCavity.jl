@@ -21,8 +21,8 @@ Simulation parameters.
 - `dt`: time step of the Crank–Nicolson / Adams–Bashforth scheme.
 - `alpha`: grid mapping parameter, 0 ≤ alpha < 1 (0 = unmapped Chebyshev grid; see `ChebyshevGrid`).
 - `backend`: solver for the q-Poisson stage, `:ceigen` (default) or `:schur` (see `SylvesterSolver`).
-- `integrator`: `:cnab2` (default, Crank–Nicolson / Adams–Bashforth 2) or `:ark3`
-  (Kennedy–Carpenter ARK3(2)4L[2]SA, third order, one-step); see `integrators.jl`.
+- `integrator`: `:ark3` (default; Kennedy–Carpenter ARK3(2)4L[2]SA, third order, one-step)
+  or `:cnab2` (Crank–Nicolson / Adams–Bashforth 2); see `integrators.jl`.
 - `T`: floating-point type of the computation.
 """
 struct CavityParameters{T<:AbstractFloat}
@@ -34,7 +34,7 @@ struct CavityParameters{T<:AbstractFloat}
     integrator::Symbol
 end
 
-function CavityParameters(; N::Int, Re, dt, alpha = 0.96, backend::Symbol = :ceigen, integrator::Symbol = :cnab2,
+function CavityParameters(; N::Int, Re, dt, alpha = 0.96, backend::Symbol = :ceigen, integrator::Symbol = :ark3,
                           T::Type{<:AbstractFloat} = Float64)
     backend in (:ceigen, :schur) || throw(ArgumentError("backend must be :ceigen or :schur"))
     integrator in (:cnab2, :ark3) || throw(ArgumentError("integrator must be :cnab2 or :ark3"))
@@ -112,8 +112,8 @@ end
 """
     step!(sim)
 
-Advance one time step with the simulation's integrator.  CNAB2:
-(qⁿ, qⁿ⁻¹) → right-hand side f → implicit solve → qⁿ⁺¹; ARK3: see `ark3_step!`.
+Advance one time step with the simulation's integrator.  ARK3: see `ark3_step!`;
+CNAB2: (qⁿ, qⁿ⁻¹) → right-hand side f → implicit solve → qⁿ⁺¹.
 Updates `sim.q`, `sim.q_prev`, `sim.ω`, `sim.step` and `sim.t`.
 """
 function step!(sim::CavitySimulation)

@@ -9,7 +9,7 @@ params = CavityParameters(
     dt      = 5e-4,     # time step
     alpha   = 0.96,     # grid mapping parameter (0 = unmapped)
     backend = :ceigen,  # :ceigen or :schur
-    integrator = :cnab2, # :cnab2 (default) or :ark3
+    integrator = :ark3, # :ark3 (default) or :cnab2
 )
 sim = CavitySimulation(params)   # grid, operators, decompositions, influence matrix (fixed cost)
 
@@ -19,8 +19,9 @@ sim.step, sim.t     # steps taken, current time
 ```
 
 `CavityParameters` also accepts `T = Float32` etc. to choose the floating-point type. With the
-default backend, initialisation takes about 0.4 s at N = 128 and 4 s at N = 256, and one step
-about 2 ms and 10 ms respectively (Apple M2 Max, 8 BLAS threads).
+default backend and integrator, initialisation takes about 0.4 s at N = 128 and 4 s at N = 256, and
+one step about 5 ms and 32 ms respectively (Apple M2 Max, 8 BLAS threads); a CNAB2 step costs
+about a third of that but requires a ~3× smaller step.
 
 ## Post-processing
 

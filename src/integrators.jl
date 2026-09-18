@@ -1,10 +1,10 @@
 # Time integrators for the vorticity equation  ∂ₜω = ν Δω − N(q),   ω = L q,
 # with the diffusion term implicit and the convection term explicit.
 #
+#   ARK3   — Kennedy & Carpenter ARK3(2)4L[2]SA (default): 4-stage, third-order additive
+#            Runge–Kutta with an ESDIRK implicit part (single diagonal coefficient γ, L-stable,
+#            stiffly accurate) and an explicit RK part sharing the weights b.  One-step.
 #   CNAB2  — Crank–Nicolson / second-order Adams–Bashforth (two-step; state qⁿ, qⁿ⁻¹).
-#   ARK3   — Kennedy & Carpenter ARK3(2)4L[2]SA: 4-stage, third-order additive Runge–Kutta
-#            with an ESDIRK implicit part (single diagonal coefficient γ, L-stable, stiffly
-#            accurate) and an explicit RK part sharing the weights b.  One-step, self-starting.
 #
 # Both use the same implicit operator (I − cΔ) with c = γ·ν·dt, γ = ½ for CNAB2 and
 # γ = 0.4358… for ARK3, so one InfluenceSolver serves the whole step.

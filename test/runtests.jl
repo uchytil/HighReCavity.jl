@@ -25,11 +25,13 @@ end
 
 @testset "HighReCavity" begin
 
+# Tests 1, 2 and 5 validate the CNAB2 scheme against the original dense solver / stored data and
+# therefore select `integrator = :cnab2` explicitly (the default is :ark3).
 @testset "1. small-N dense equivalence (N = 8, 12)" begin
     Random.seed!(1)
     for N in (8, 12), backend in (:ceigen, :schur)
         ref = DenseSystem(N, α, dt, Re_old)
-        sim = CavitySimulation(CavityParameters(N = N, Re = Re_full, dt = dt, alpha = α, backend = backend))
+        sim = CavitySimulation(CavityParameters(N = N, Re = Re_full, dt = dt, alpha = α, backend = backend, integrator = :cnab2))
         for trial in 1:3
             f = randn(N+1, N+1)
             q_ref = ReferenceDense.solve(ref, f)
@@ -54,7 +56,7 @@ end
     for (N, nsteps) in ((8, 3), (24, 100))
         q_v, qp_v, ω_v = read_validated(joinpath(@__DIR__, "data", "validated_N$(N)_steps$(nsteps).txt"))
         for backend in (:ceigen, :schur)
-            sim = CavitySimulation(CavityParameters(N = N, Re = Re_full, dt = dt, alpha = α, backend = backend))
+            sim = CavitySimulation(CavityParameters(N = N, Re = Re_full, dt = dt, alpha = α, backend = backend, integrator = :cnab2))
             run!(sim, nsteps)
             @test sim.step == nsteps && sim.t ≈ nsteps * dt
             @test relerr(sim.q, q_v) < 1e-10
@@ -64,7 +66,7 @@ end
         # and against the original dense solver stepped here
         ref = DenseSystem(N, α, dt, Re_old)
         q, qp = ReferenceDense.initial_state(ref)
-        sim = CavitySimulation(CavityParameters(N = N, Re = Re_full, dt = dt, alpha = α))
+        sim = CavitySimulation(CavityParameters(N = N, Re = Re_full, dt = dt, alpha = α, integrator = :cnab2))
         @test sim.q == q && sim.q_prev == qp
         for n in 1:nsteps; ReferenceDense.step!(q, qp, ref); end
         run!(sim, nsteps)
@@ -78,7 +80,7 @@ end
 
 @testset "3. boundary conditions" begin
     N = 16
-    sim = CavitySimulation(CavityParameters(N = N, Re = Re_full, dt = dt, alpha = α))
+    sim = CavitySimulation(CavityParameters(N = N, Re = Re_full, dt = dt, alpha = α))   # default integrator (ARK3)
     x = grid(sim).x
     L = sim.solver.layout
     for n in 1:5
@@ -111,12 +113,13 @@ end
 end
 
 @testset "5. Reynolds-number convention (public Re = full side length)" begin
-    p = CavityParameters(N = 16, Re = 30_000, dt = dt)
+    p = CavityParameters(N = 16, Re = 30_000, dt = dt, integrator = :cnab2)
     @test p.Re == 30_000
     @test reynolds_internal(p) == 15_000
-    @test HighReCavity.diffusion_coefficient(p) == 0.5 * dt / 15_000
+    @test HighReCavity.diffusion_coefficient(p) == 0.5 * dt / 15_000                       # γ = ½ for CNAB2
+    @test HighReCavity.diffusion_coefficient(CavityParameters(N = 16, Re = 30_000, dt = dt)) == HighReCavity.ARK3_γ * dt / 15_000
     # one step with public Re = 30_000 equals the original run with Re = 15_000 …
-    sim = CavitySimulation(CavityParameters(N = 16, Re = 30_000, dt = dt, alpha = α))
+    sim = CavitySimulation(CavityParameters(N = 16, Re = 30_000, dt = dt, alpha = α, integrator = :cnab2))
     ref = DenseSystem(16, α, dt, 15_000.0)
     q, qp = ReferenceDense.initial_state(ref)
     for n in 1:5; ReferenceDense.step!(q, qp, ref); step!(sim); end
