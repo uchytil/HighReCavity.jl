@@ -90,8 +90,15 @@ These are derivatives of the polynomial ``\psi`` itself, including on the walls 
 
 ## Time integration
 
-The vorticity equation is advanced with Crank–Nicolson for diffusion and second-order
-Adams–Bashforth for convection. With ``c = \nu\,\mathrm{dt}/2`` and ``\mathcal N = u\,\omega_x + v\,\omega_y``,
+The vorticity equation is advanced with the diffusion term implicit and the convection term
+explicit. Two schemes are available (`integrator` parameter); both use the same implicit
+operator ``(I - c\Delta)`` with ``c = \gamma\,\nu\,\mathrm{dt}``, where ``\gamma`` is the scheme's
+implicit weight, so one influence solver (Section 5) serves the whole step. Here
+``\mathcal N = u\,\omega_x + v\,\omega_y`` and ``\Delta`` on the left-hand side is the collocation
+Laplacian ``D_2\,\Omega + \Omega\,D_2^{\mathsf T}`` acting on the nodal vorticity.
+
+**CNAB2** (default): Crank–Nicolson for diffusion (``\gamma = 1/2``) and second-order
+Adams–Bashforth for convection,
 
 ```math
 (I - c\Delta)\,\omega^{n+1} = f, \qquad
@@ -99,18 +106,42 @@ f = \omega^n + c\,\Delta\omega^n - \mathrm{dt}\left(\tfrac32 \mathcal N^n - \tfr
 ```
 
 where ``\omega^n = LQ^n`` and ``\Delta\omega^n = \Delta^2\psi^n`` are formed from ``q^n`` with the
-operators above, ``\omega_x = D_1\Omega``, ``\omega_y = \Omega D_1^{\mathsf T}``, and on the
-left-hand side ``\Delta`` is the collocation Laplacian ``D_2\,\Omega + \Omega\,D_2^{\mathsf T}``
-acting on the nodal vorticity. On the first step ``\mathcal N^{-1} = 0``. The new state ``q^{n+1}``
-is defined by ``L q^{n+1} = \omega^{n+1}`` together with the wall values of ``q``; solving this
-coupled problem is the subject of the next section. One step is therefore
+product-rule operators above, and ``\omega_x = D_1\Omega``, ``\omega_y = \Omega D_1^{\mathsf T}``.
+On the first step ``\mathcal N^{-1} = 0``. The state is ``(q^n, q^{n-1})``. Note that the explicit
+viscous term uses the product-rule ``\Delta^2\psi`` while the implicit one uses the collocation
+Laplacian of ``\omega``; on the mapped grid these differ by the truncation error of the mapping
+(a few ``10^{-6}`` relative in ``\omega`` at ``N = 192``, ``Re = 30\,000``).
+
+**ARK3**: the additive Runge–Kutta scheme ARK3(2)4L[2]SA of Kennedy & Carpenter (2003): four
+stages, third order, an L-stable, stiffly accurate ESDIRK implicit part with a single diagonal
+coefficient ``\gamma = 0.4358665\ldots``, and an explicit part sharing the weights ``b``. Stage
+``i`` solves
 
 ```math
-(q^n, q^{n-1}) \;\to\; f \;\to\; \text{implicit solve} \;\to\; q^{n+1}.
+(I - \gamma\,\nu\,\mathrm{dt}\,\Delta)\,\omega_i = \omega^n + \mathrm{dt}\sum_{j<i}\big(a^E_{ij} E_j + a^I_{ij} I_j\big),
+\qquad E_j = -\mathcal N(q_j),\quad I_j = \nu\Delta\omega_j,
 ```
 
-The step size `dt` is limited by the explicit convection term; the diffusion term is
-unconditionally stable.
+through the influence solver (which yields ``q_i``), with ``I_i`` recovered as
+``(\omega_i - f_i)/(\gamma\,\mathrm{dt})``. Only the implicit part is stiffly accurate, so the step
+ends with ``\omega^{n+1} = \omega_4 + \mathrm{dt}\sum_j (b_j - a^E_{4j}) E_j`` at interior nodes and a
+q-Poisson solve that recovers ``q^{n+1}`` (and the wall vorticity) from it. The scheme is
+one-step and its stability does not rely on viscous damping of the grid-scale modes; the
+embedded second-order weights ``\hat b`` are available for error estimation. It costs three
+influence solves and four convection evaluations per step (about 2.9× a CNAB2 step) and is
+stable up to about 3× the CNAB2 step, so the cost per unit of simulated time is the same; the
+time-discretisation error at equal ``\mathrm{dt}`` is 20–60× smaller.
+
+In either case the step is
+
+```math
+(q^n, q^{n-1}) \;\to\; f \;\to\; \text{implicit solve(s)} \;\to\; q^{n+1},
+```
+
+and the step size ``\mathrm{dt}`` is limited by the explicit convection term (the diffusion term is
+unconditionally stable). At ``N = 192``, ``Re = 30\,000``, CNAB2 is stable up to
+``\mathrm{dt} \approx 4\cdot10^{-3}`` and ARK3 up to ``\approx 1.2\cdot10^{-2}`` from a developed state; the
+impulsive start needs a smaller step for the first few time units.
 
 ## The implicit solve
 

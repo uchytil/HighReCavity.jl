@@ -56,6 +56,16 @@ function laplacian!(ω, q, ops::CavityOperators, tmp)
 end
 
 """
+    laplacian_nodal!(out, F, ops)  —  out = D2·F + F·D2ᵀ,  the collocation Laplacian of a nodal field
+                                       (the operator the implicit step applies to ω)
+"""
+function laplacian_nodal!(out, F, ops::CavityOperators)
+    mul!(out, ops.D2, F)
+    mul!(out, F, transpose(ops.D2), true, true)
+    return out
+end
+
+"""
     biharmonic!(B, q, ops, tmp1, tmp2)  —  B = Δ²ψ = ψ_xxxx + ψ_yyyy + 2ψ_xxyy
                                              = D4q·Q·W + W·Q·D4qᵀ + D2·(W·Q·D2qᵀ) + (D2q·Q·W)·D2ᵀ
 

@@ -136,4 +136,37 @@ end
     @test_throws ArgumentError CavityParameters(N = 8, Re = 1.0, dt = dt, backend = :eigen)
 end
 
+@testset "6. ARK3 integrator" begin
+    # temporal order of convergence on a resolved case (Re = 1000, N = 24): ARK3 third order,
+    # CNAB2 second order; both integrators satisfy the wall data and ω = L q.
+    N, Re = 24, 1000.0
+    s0 = CavitySimulation(CavityParameters(N = N, Re = Re, dt = 5e-4)); run!(s0, 200); q0 = copy(s0.q)
+    T = 0.16
+    function advance(integ, dt)
+        sim = CavitySimulation(CavityParameters(N = N, Re = Re, dt = dt, integrator = integ))
+        sim.q .= q0; sim.q_prev .= q0
+        run!(sim, round(Int, T / dt)); return sim
+    end
+    ref = advance(:ark3, 2.5e-4)
+    e_ark = [relerr(advance(:ark3, dt).q, ref.q) for dt in (8e-3, 4e-3, 2e-3)]
+    @test 6 < e_ark[1] / e_ark[2] < 10 && 6 < e_ark[2] / e_ark[3] < 10
+    # ARK3 tableau: third-order conditions (shared weights b, explicit and implicit parts, coupling)
+    γ = HighReCavity.ARK3_γ; b = collect(HighReCavity.ARK3_b); bhat = collect(HighReCavity.ARK3_bhat)
+    AE = zeros(4, 4); AI = zeros(4, 4)
+    for i in 2:4, j in 1:i-1; AE[i, j] = HighReCavity.ARK3_AE[i-1][j]; AI[i, j] = HighReCavity.ARK3_AI[i-1][j]; end
+    for i in 2:4; AI[i, i] = γ; end
+    c = vec(sum(AE, dims = 2))
+    @test vec(sum(AI, dims = 2)) ≈ c
+    @test AI[4, :] ≈ b                                   # stiffly accurate implicit part
+    @test sum(b) ≈ 1 && b'c ≈ 1/2 && b' * (c.^2) ≈ 1/3
+    @test b' * (AE * c) ≈ 1/6 && b' * (AI * c) ≈ 1/6
+    @test sum(bhat) ≈ 1 && bhat'c ≈ 1/2
+    # boundary conditions and consistency after ARK3 steps
+    sim = CavitySimulation(CavityParameters(N = 16, Re = Re_full, dt = dt, alpha = α, integrator = :ark3))
+    run!(sim, 5); x = grid(sim).x
+    @test sim.q[:, end] == -1/2 .* (1 .- x.^2) && all(sim.q[:, 1] .== 0) && all(sim.q[[1, end], :] .== 0)
+    @test relerr(sim.ω, vorticity(sim)) < 1e-13
+    @test_throws ArgumentError CavityParameters(N = 8, Re = 1.0, dt = dt, integrator = :rk4)
+end
+
 end

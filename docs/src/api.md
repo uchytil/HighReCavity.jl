@@ -30,10 +30,18 @@ diff_matrices
 interp_matrix
 CavityOperators
 laplacian!
+laplacian_nodal!
 biharmonic!
 convection!
 rhs!
 reynolds_internal
+```
+
+## Time integrators
+
+```@docs
+HighReCavity.ark3_step!
+HighReCavity.implicit_weight
 ```
 
 ## Implicit solve

@@ -9,6 +9,7 @@ params = CavityParameters(
     dt      = 5e-4,     # time step
     alpha   = 0.96,     # grid mapping parameter (0 = unmapped)
     backend = :ceigen,  # :ceigen or :schur
+    integrator = :cnab2, # :cnab2 (default) or :ark3
 )
 sim = CavitySimulation(params)   # grid, operators, decompositions, influence matrix (fixed cost)
 

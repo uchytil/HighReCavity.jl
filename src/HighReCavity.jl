@@ -17,11 +17,12 @@ include("chebyshev.jl")      # mapped Gauss–Lobatto grid, differentiation, int
 include("operators.jl")      # spectral operators of the q representation, physical fields
 include("sylvester.jl")      # interior Dirichlet solves (Helmholtz, q-Poisson) as Sylvester equations
 include("influence.jl")      # wall-node layout, influence matrix, solution of one implicit step
+include("integrators.jl")    # time integrators (CNAB2, ARK3)
 include("simulation.jl")     # parameters, state, step!, run!
 
 export CavityParameters, CavitySimulation, step!, run!,
        streamfunction, vorticity, velocity, grid, reynolds_internal,
        ChebyshevGrid, CavityOperators, diff_matrices, interp_matrix,
-       InfluenceSolver, influence_solve!, rhs!, laplacian!, biharmonic!, convection!
+       InfluenceSolver, influence_solve!, rhs!, laplacian!, laplacian_nodal!, biharmonic!, convection!
 
 end # module

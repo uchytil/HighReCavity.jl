@@ -21,6 +21,8 @@ Simulation parameters.
 - `dt`: time step of the Crank–Nicolson / Adams–Bashforth scheme.
 - `alpha`: grid mapping parameter, 0 ≤ alpha < 1 (0 = unmapped Chebyshev grid; see `ChebyshevGrid`).
 - `backend`: solver for the q-Poisson stage, `:ceigen` (default) or `:schur` (see `SylvesterSolver`).
+- `integrator`: `:cnab2` (default, Crank–Nicolson / Adams–Bashforth 2) or `:ark3`
+  (Kennedy–Carpenter ARK3(2)4L[2]SA, third order, one-step); see `integrators.jl`.
 - `T`: floating-point type of the computation.
 """
 struct CavityParameters{T<:AbstractFloat}
@@ -29,11 +31,14 @@ struct CavityParameters{T<:AbstractFloat}
     dt::T
     alpha::T
     backend::Symbol   # q-Poisson stage: :ceigen or :schur
+    integrator::Symbol
 end
 
-function CavityParameters(; N::Int, Re, dt, alpha = 0.96, backend::Symbol = :ceigen, T::Type{<:AbstractFloat} = Float64)
+function CavityParameters(; N::Int, Re, dt, alpha = 0.96, backend::Symbol = :ceigen, integrator::Symbol = :cnab2,
+                          T::Type{<:AbstractFloat} = Float64)
     backend in (:ceigen, :schur) || throw(ArgumentError("backend must be :ceigen or :schur"))
-    return CavityParameters{T}(N, T(Re), T(dt), T(alpha), backend)
+    integrator in (:cnab2, :ark3) || throw(ArgumentError("integrator must be :cnab2 or :ark3"))
+    return CavityParameters{T}(N, T(Re), T(dt), T(alpha), backend, integrator)
 end
 
 """
@@ -45,8 +50,8 @@ half-width as length scale while `params.Re` uses the full side length L = 2, so
 """
 reynolds_internal(p::CavityParameters) = p.Re / 2
 
-"Diffusion coefficient of the implicit step, c = ν dt / 2 = dt / (2 Re_internal)."
-diffusion_coefficient(p::CavityParameters) = p.dt / (2 * reynolds_internal(p))
+"Diffusion coefficient of the implicit solve, c = γ ν dt with γ the scheme's implicit weight (½ for CNAB2)."
+diffusion_coefficient(p::CavityParameters) = implicit_weight(integrator_type(Val(p.integrator), Float64, 0)) * p.dt / reynolds_internal(p)
 
 struct Workspace{T}
     A::Matrix{T}; B::Matrix{T}; C::Matrix{T}     # scratch for laplacian!/biharmonic!/convection!
@@ -55,12 +60,13 @@ struct Workspace{T}
 end
 Workspace{T}(n) where {T} = Workspace{T}(ntuple(_ -> zeros(T, n, n), 7)...)
 
-mutable struct CavitySimulation{T<:AbstractFloat, S<:InfluenceSolver{T}}
+mutable struct CavitySimulation{T<:AbstractFloat, S<:InfluenceSolver{T}, TI<:TimeIntegrator}
     params::CavityParameters{T}
     ops::CavityOperators{T}
     solver::S
+    scheme::TI
     q::Matrix{T}          # current state qⁿ  (ψ = (1−x²)(1−y²) q)
-    q_prev::Matrix{T}     # qⁿ⁻¹ (for Adams–Bashforth)
+    q_prev::Matrix{T}     # qⁿ⁻¹ (used by CNAB2; the previous state for ARK3)
     ω::Matrix{T}          # vorticity Δψⁿ, produced by the last implicit solve (zero before the first step)
     f::Matrix{T}          # right-hand side work array
     work::Workspace{T}
@@ -81,10 +87,11 @@ function CavitySimulation(p::CavityParameters{T}) where {T}
     ops = CavityOperators(grid)
     solver = InfluenceSolver(ops, diffusion_coefficient(p); backend = p.backend)
     n = p.N + 1
+    scheme = integrator_type(Val(p.integrator), T, n)
     q = zeros(T, n, n)
-    q_prev = copy(q)                                   # q⁻¹ = 0, so N⁻¹ = 0 on the first step
+    q_prev = copy(q)                                   # q⁻¹ = 0, so N⁻¹ = 0 on the first CNAB2 step
     set_walls!(q, solver.g, solver.layout)
-    return CavitySimulation{T,typeof(solver)}(p, ops, solver, q, q_prev, zeros(T, n, n), zeros(T, n, n), Workspace{T}(n), 0, zero(T))
+    return CavitySimulation{T,typeof(solver),typeof(scheme)}(p, ops, solver, scheme, q, q_prev, zeros(T, n, n), zeros(T, n, n), Workspace{T}(n), 0, zero(T))
 end
 
 """
@@ -105,18 +112,26 @@ end
 """
     step!(sim)
 
-Advance one time step:  (qⁿ, qⁿ⁻¹) → right-hand side f → implicit solve → qⁿ⁺¹.
+Advance one time step with the simulation's integrator.  CNAB2:
+(qⁿ, qⁿ⁻¹) → right-hand side f → implicit solve → qⁿ⁺¹; ARK3: see `ark3_step!`.
 Updates `sim.q`, `sim.q_prev`, `sim.ω`, `sim.step` and `sim.t`.
 """
 function step!(sim::CavitySimulation)
+    step!(sim, sim.scheme)
+    sim.step += 1
+    sim.t += sim.params.dt
+    return sim
+end
+
+function step!(sim::CavitySimulation, ::CNAB2)
     p = sim.params
     rhs!(sim.f, sim.q, sim.q_prev, sim.ops, p.dt, diffusion_coefficient(p), sim.work)
     sim.q_prev .= sim.q
     influence_solve!(sim.q, sim.ω, sim.f, sim.solver)
-    sim.step += 1
-    sim.t += p.dt
     return sim
 end
+
+step!(sim::CavitySimulation, s::ARK3) = ark3_step!(sim, s)
 
 """
     run!(sim, nsteps; callback = nothing, every = 1, check_nan = true)
