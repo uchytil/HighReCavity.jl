@@ -13,8 +13,8 @@ using Mmap
 function trajectory(path::AbstractString)
     meta = Dict(split(l)[1] => split(l)[2] for l in readlines(path * ".meta"))
     n = parse(Int, meta["N"]) + 1
-    t0 = parse(Float64, meta["transient"]); Δ = parse(Float64, meta["save_every"])
+    t0 = parse(Float64, meta["t_first"]); Δ = parse(Float64, meta["save_every"])
     nsnap = filesize(path) ÷ (n^2 * sizeof(Float64))
     Q = open(io -> Mmap.mmap(io, Array{Float64,3}, (n, n, nsnap)), path)
-    return Q, t0 .+ (1:nsnap) .* Δ        # the first snapshot is one interval after the transient
+    return Q, t0 .+ (0:nsnap-1) .* Δ
 end
