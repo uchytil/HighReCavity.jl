@@ -64,7 +64,8 @@ run!(sim, 1_000_000; every = 200, callback = collect!)      # production interva
 
 `run!` stops with an error if the solution becomes NaN (`check_nan = false` disables the
 check). A run can be resumed from a saved `(q, q_prev)` pair by copying them into `sim.q` and
-`sim.q_prev` of a simulation built with the same parameters. See `examples/run_cavity.jl`.
+`sim.q_prev` of a simulation built with the same parameters. See `examples/long_trajectory.jl` for a resumable long run, and `examples/read_trajectory.jl`
+for reading the result back.
 
 
 ## Tests
