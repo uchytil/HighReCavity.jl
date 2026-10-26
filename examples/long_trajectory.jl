@@ -55,20 +55,24 @@ function main()
             nsteps, tend, nsteps ÷ stride, (nsaved + nsteps ÷ stride) * rec / 2^30)
     flush(stdout)
 
-    k, t0, tlast = nsaved, time(), time()
+    k, t0, tlast, klast = nsaved, time(), time(), nsaved
     open(path, "a") do io
         run!(sim, nsteps; every = stride, callback = function (s)
             write(io, s.q)
             k += 1
             if time() - tlast >= report_every || k == nsaved + nsteps ÷ stride
                 flush(io)
-                tlast = time()
-                el = tlast - t0
+                now = time()
+                el = now - t0
                 done = (k - nsaved) * stride
                 frac = done / nsteps
+                # rate over the last interval, not the cumulative average: startup and
+                # compilation land in the first window and would skew the estimate for hours
+                rate = (now - tlast) / max((k - klast) * stride, 1)
+                tlast, klast = now, k
                 @printf("%s %5.1f%%  t = %8.1f/%.0f  snap %6d  %5.1f ms/step  elapsed %s  ETA %s  max|ω| %5.1f  %.1f GB\n",
-                        bar(frac), 100frac, s.t, tend, k, 1e3 * el / done,
-                        hms(el), hms(el * (nsteps - done) / max(done, 1)),
+                        bar(frac), 100frac, s.t, tend, k, 1e3 * rate,
+                        hms(el), hms(rate * (nsteps - done)),
                         maximum(abs, s.ω), filesize(path) / 2^30)
                 flush(stdout)
             end
